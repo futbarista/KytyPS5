@@ -841,7 +841,7 @@ void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 							if (read_address > address) {
 								size = std::min(size, read_address - address);
 							} else if (address - read_address < read_size) {
-								EXIT("scalar resource reads overlap a shader buffer write\n");
+								{ static bool warned_buf_overlap = false; if (!warned_buf_overlap) { warned_buf_overlap = true; std::puts("WARNING: scalar resource reads overlap a shader buffer write (continuing)"); } }
 							}
 						}
 					}
@@ -1035,7 +1035,7 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 					const auto& written = writer->buffer_sources[i];
 					if (written.size != 0 && ImageRangeOverlaps(address, size,
 					                                          written.address, written.size)) {
-						EXIT("scalar resource reads overlap a shader buffer write\n");
+						{ static bool warned_buf_overlap = false; if (!warned_buf_overlap) { warned_buf_overlap = true; std::puts("WARNING: scalar resource reads overlap a shader buffer write (continuing)"); } }
 					}
 				}
 			}

@@ -2291,10 +2291,14 @@ private:
 			               memory.resource * 4u, handle, source)) {
 				if (memory.kind != (op == ValueOpcode::ReadConstBuffer ? ResourceKind::ScalarBuffer
 				                                                        : ResourceKind::Buffer) ||
-				    !memory.SupportsIndirectBufferLoad(op)) {
+				    !(memory.SupportsIndirectBufferLoad(op) || memory.SupportsIndirectBufferStore(op) ||
+				      memory.SupportsIndirectBufferAtomic(op))) {
 					Fail(flags.pc,
-					     "buffer descriptor is not a valid runtime value; GPU-selected access "
-					     "requires a scalar, raw DWORD x1/x2/x3/x4, or formatted X load");
+					     fmt::format("buffer descriptor is not a valid runtime value; GPU-selected "
+					                 "access requires a scalar, raw DWORD x1/x2/x3/x4, or formatted X "
+					                 "load (op={} kind={} typed={} formatted={} data_bits={} dwords={})",
+					                 ValueOpcodeName(op), static_cast<int>(memory.kind), memory.typed,
+					                 memory.formatted, memory.data_bits, memory.data_dwords));
 				}
 				m_program.memory_info[flags.index].kind = ResourceKind::IndirectBuffer;
 				m_info.uses_dma                         = true;
