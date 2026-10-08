@@ -1629,23 +1629,23 @@ private:
 		for (uint32_t dword = 0; dword < handle.NumArgs(); ++dword) {
 			auto* read = descriptor.dwords[dword].Resolve().TryInstruction();
 			if (read == nullptr) {
-				return false;
+				{ std::printf("KD hash=%016llx line=%d", static_cast<unsigned long long>(m_program.shader_hash), __LINE__); std::puts(""); return false; }
 			}
 			uint32_t memory_index = 0;
 			const auto* memory = ScalarReadMemory(*read, memory_index);
 			uint32_t component = 0;
 			const bool indexed = memory == nullptr;
 			if (indexed) {
-				if (handle.NumArgs() != 8u) return false;
+				if (handle.NumArgs() != 8u) { std::printf("KD hash=%016llx line=%d", static_cast<unsigned long long>(m_program.shader_hash), __LINE__); std::puts(""); return false; }
 				const auto* selected = UniformizedMaterialValue(descriptor.dwords[dword], handle);
-				if (selected == nullptr) return false;
+				if (selected == nullptr) { std::printf("KD hash=%016llx line=%d", static_cast<unsigned long long>(m_program.shader_hash), __LINE__); std::puts(""); return false; }
 				const auto* extract = selected->Arg(1).Resolve().TryInstruction();
 				if (extract == nullptr || extract->GetOpcode() != ValueOpcode::CompositeExtractU32x4 ||
-				    !ImmediateU32(extract->Arg(1), component) || component >= 4u) return false;
+				    !ImmediateU32(extract->Arg(1), component) || component >= 4u) { std::printf("KD hash=%016llx line=%d", static_cast<unsigned long long>(m_program.shader_hash), __LINE__); std::puts(""); return false; }
 				read = extract->Arg(0).Resolve().TryInstruction();
-				if (read == nullptr || read->GetOpcode() != ValueOpcode::LoadBufferU32x4) return false;
+				if (read == nullptr || read->GetOpcode() != ValueOpcode::LoadBufferU32x4) { std::printf("KD hash=%016llx line=%d", static_cast<unsigned long long>(m_program.shader_hash), __LINE__); std::puts(""); return false; }
 				memory_index = read->Flags<MemoryFlags>().index;
-				if (memory_index >= m_program.memory_info.size()) return false;
+				if (memory_index >= m_program.memory_info.size()) { std::printf("KD hash=%016llx line=%d", static_cast<unsigned long long>(m_program.shader_hash), __LINE__); std::puts(""); return false; }
 				memory = &m_program.memory_info[memory_index];
 				uint32_t offset = 1u, scalar = 1u;
 				if (memory->kind != ResourceKind::Buffer || memory->typed || memory->formatted ||
@@ -1654,12 +1654,12 @@ private:
 				    !ImmediateU32(read->Arg(2), offset) || offset != 0u ||
 				    !ImmediateU32(read->Arg(3), scalar) || scalar != 0u ||
 				    !EquivalentValue(m_program, read->Arg(4), selected->Arg(0)) ||
-				    (dword != 0u && !EquivalentValue(m_program, table_guard, read->Arg(4)))) return false;
+				    (dword != 0u && !EquivalentValue(m_program, table_guard, read->Arg(4)))) { std::printf("KD hash=%016llx line=%d", static_cast<unsigned long long>(m_program.shader_hash), __LINE__); std::puts(""); return false; }
 				table_guard = read->Arg(4);
 			}
 			if (memory->offset > INT32_MAX || (memory->offset & 3u) != 0u ||
 			    !MemoryIndexBelongsTo(memory_index, *read)) {
-				return false;
+				{ std::printf("KD hash=%016llx line=%d", static_cast<unsigned long long>(m_program.shader_hash), __LINE__); std::puts(""); return false; }
 			}
 			auto* current_handle = read->Arg(0).Resolve().TryInstruction();
 			Value current_key;
@@ -1673,14 +1673,14 @@ private:
 			    (table_handle != nullptr &&
 			     !EquivalentValue(m_program, Value(table_handle), Value(current_handle))) ||
 			    (!indexed && !MatchTableOffset(read->Arg(1), current_key, offset, stride))) {
-				return false;
+				{ std::printf("KD hash=%016llx line=%d", static_cast<unsigned long long>(m_program.shader_hash), __LINE__); std::puts(""); return false; }
 			}
 			if (indexed) {
 				current_key = read->Arg(1);
 				offset = component * 4u;
 			}
 			if (dword == 0u) {
-				if (component != 0u) return false;
+				if (component != 0u) { std::printf("KD hash=%016llx line=%d", static_cast<unsigned long long>(m_program.shader_hash), __LINE__); std::puts(""); return false; }
 				plan.table_indexed = indexed;
 				key = current_key;
 				table_offset = offset;
@@ -1690,7 +1690,7 @@ private:
 			           !EquivalentValue(m_program, key, current_key) ||
 			           uint64_t {table_offset} + table_immediate + dword * sizeof(uint32_t) !=
 			               uint64_t {offset} + memory->offset) {
-				return false;
+				{ std::printf("KD hash=%016llx line=%d", static_cast<unsigned long long>(m_program.shader_hash), __LINE__); std::puts(""); return false; }
 			}
 			plan.split_offsets |= !indexed && offset != table_offset;
 			table_handle = current_handle;
@@ -1703,7 +1703,7 @@ private:
 					       return consumer.user->GetOpcode() != ValueOpcode::StoreBufferU32;
 				       });
 			    })) {
-				return false;
+				{ std::printf("KD hash=%016llx line=%d", static_cast<unsigned long long>(m_program.shader_hash), __LINE__); std::puts(""); return false; }
 			}
 			plan.memory[dword] = memory_index;
 			plan.reads[dword] = read;
@@ -1787,15 +1787,15 @@ private:
 	bool TryMakeIndirectBuffer(Inst& handle, const DescriptorSource& descriptor,
 	                           IndirectDescriptorPlan& plan) {
 		if (handle.GetOpcode() != ValueOpcode::GetBufferResource || handle.NumArgs() != 4u ||
-		    handle.Uses().empty()) return false;
+		    handle.Uses().empty()) { std::printf("KD hash=%016llx line=%d", static_cast<unsigned long long>(m_program.shader_hash), __LINE__); std::puts(""); return false; }
 		for (const auto& use: handle.Uses()) {
 			const auto& inst = *use.user;
-			if (inst.GetOpcode() != ValueOpcode::StoreBufferU32) return false;
+			if (inst.GetOpcode() != ValueOpcode::StoreBufferU32) { std::printf("KD hash=%016llx line=%d", static_cast<unsigned long long>(m_program.shader_hash), __LINE__); std::puts(""); return false; }
 			const auto& memory = m_program.memory_info[inst.Flags<MemoryFlags>().index];
 			uint32_t scalar = 1u;
 			if (memory.kind != ResourceKind::Buffer || memory.typed || memory.formatted ||
 			    memory.idxen || !memory.offen || !ImmediateU32(inst.Arg(3), scalar) || scalar != 0u)
-				return false;
+				{ std::printf("KD hash=%016llx line=%d", static_cast<unsigned long long>(m_program.shader_hash), __LINE__); std::puts(""); return false; }
 		}
 		DescriptorSource table_source;
 		Value key;
@@ -1804,25 +1804,25 @@ private:
 		uint32_t table_immediate = 0;
 		if (!MatchDescriptorTable(handle, descriptor, plan, table_source, key, table_offset,
 		                          table_stride, table_immediate) || table_stride != 16u ||
-		    table_source.dword_count != 4u || table_offset != 0u || table_immediate != 0u) return false;
+		    table_source.dword_count != 4u || table_offset != 0u || table_immediate != 0u) { std::printf("KD hash=%016llx line=%d", static_cast<unsigned long long>(m_program.shader_hash), __LINE__); std::puts(""); return false; }
 		const auto* lane_read = key.Resolve().TryInstruction();
 		if (lane_read == nullptr || lane_read->GetOpcode() != ValueOpcode::ReadFirstLane)
-			return false;
+			{ std::printf("KD hash=%016llx line=%d", static_cast<unsigned long long>(m_program.shader_hash), __LINE__); std::puts(""); return false; }
 		const Inst* selected = nullptr;
 		for (const auto& use: handle.Uses()) {
 			const auto* value = UniformizedMaterialValue(
 			    key, *use.user, use.user->Arg(use.user->NumArgs() - 1u));
-			if (value == nullptr || (selected != nullptr && selected != value)) return false;
+			if (value == nullptr || (selected != nullptr && selected != value)) { std::printf("KD hash=%016llx line=%d", static_cast<unsigned long long>(m_program.shader_hash), __LINE__); std::puts(""); return false; }
 			selected = value;
 		}
 		const auto* read = selected->Arg(1).Resolve().TryInstruction();
 		uint32_t lane = 0;
 		if (read != nullptr && read->GetOpcode() == ValueOpcode::CompositeExtractU32x2) {
-			if (!ImmediateU32(read->Arg(1), lane) || lane >= 2u) return false;
+			if (!ImmediateU32(read->Arg(1), lane) || lane >= 2u) { std::printf("KD hash=%016llx line=%d", static_cast<unsigned long long>(m_program.shader_hash), __LINE__); std::puts(""); return false; }
 			read = read->Arg(0).Resolve().TryInstruction();
-			if (read == nullptr || read->GetOpcode() != ValueOpcode::LoadBufferU32x2) return false;
+			if (read == nullptr || read->GetOpcode() != ValueOpcode::LoadBufferU32x2) { std::printf("KD hash=%016llx line=%d", static_cast<unsigned long long>(m_program.shader_hash), __LINE__); std::puts(""); return false; }
 		} else if (read == nullptr || read->GetOpcode() != ValueOpcode::LoadBufferU32) {
-			return false;
+			{ std::printf("KD hash=%016llx line=%d", static_cast<unsigned long long>(m_program.shader_hash), __LINE__); std::puts(""); return false; }
 		}
 		const auto& memory = m_program.memory_info[read->Flags<MemoryFlags>().index];
 		uint32_t offset = 1u, scalar = 1u;
@@ -1830,12 +1830,12 @@ private:
 		    !memory.idxen || memory.offen || memory.offset > UINT32_MAX - lane * 4u ||
 		    !ImmediateU32(read->Arg(2), offset) || offset != 0u ||
 		    !ImmediateU32(read->Arg(3), scalar) || scalar != 0u ||
-		    !EquivalentValue(m_program, selected->Arg(0), read->Arg(4))) return false;
+		    !EquivalentValue(m_program, selected->Arg(0), read->Arg(4))) { std::printf("KD hash=%016llx line=%d", static_cast<unsigned long long>(m_program.shader_hash), __LINE__); std::puts(""); return false; }
 		DescriptorSource material_source;
 		DescriptorSource::IndirectDescriptor indirect;
 		indirect.table_stride = table_stride;
 		if (!MakeRuntimeTableSource(*read, material_source) ||
-		    !BoundedSelectedIndex(read->Arg(1), read->Arg(4), indirect)) return false;
+		    !BoundedSelectedIndex(read->Arg(1), read->Arg(4), indirect)) { std::printf("KD hash=%016llx line=%d", static_cast<unsigned long long>(m_program.shader_hash), __LINE__); std::puts(""); return false; }
 		indirect.selector.emplace(DescriptorSource::IndirectDescriptor::SelectorRead{.source = InternSource(material_source),
 		                              .offset = memory.offset + lane * 4u});
 		indirect.table_source = InternSource(table_source);
