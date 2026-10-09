@@ -254,6 +254,10 @@ TextureCache::TextureCache(GraphicContext& graphics, CommandScheduler& scheduler
 	};
 	// Collection starts where the video memory use reaches the budget less its headroom (GetTotalMemoryBudget):
 	// below it a kept image costs nothing, a deleted one an upload when the game uses it again.
+	UpdateGcThresholds();
+}
+
+void TextureCache::UpdateGcThresholds() {
 	m_trigger_gc_memory = m_graphics.GetTotalMemoryBudget();
 }
 
@@ -3556,8 +3560,20 @@ void TextureCache::RunGarbageCollector() {
 	EraseRetired();
 	std::scoped_lock lock {m_lock};
 	const uint64_t   tick = m_gc_tick++;
+	// Once a second (the collector runs per frame): the threshold follows the current budget, and
+	// every ten seconds the log has the video memory in use against it.
+	if ((tick % 60) == 0) {
+		UpdateGcThresholds();
+	}
 	if (m_graphics.CanReportMemoryUsage()) {
 		m_total_used_memory = m_graphics.GetDeviceMemoryUsage();
+		if ((tick % 600) == 0) {
+			std::printf("VRAM: %llu MiB in use, budget %llu MiB (collect from %llu MiB)\n",
+			            static_cast<unsigned long long>(m_total_used_memory >> 20u),
+			            static_cast<unsigned long long>(m_graphics.GetTotalMemoryBudget() >> 20u),
+			            static_cast<unsigned long long>(m_trigger_gc_memory >> 20u));
+			std::fflush(stdout);
+		}
 	}
 	// A GPU short of video memory: a log line on where it goes when its use moved by 256 MiB (checked every 60 flips).
 	if (uint64_t video = 0, budget = 0; m_graphics.small_video_memory && tick % 60 == 0 &&

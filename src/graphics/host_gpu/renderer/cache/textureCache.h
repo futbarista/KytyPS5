@@ -142,6 +142,9 @@ public:
 	void UnmapMemory(uint64_t address, uint64_t size);
 	void ProcessDownloadImages();
 	void RunGarbageCollector();
+	// The collection thresholds from the GPU's current memory budget (it shrinks while other
+	// programs use video memory, e.g. a second monitor's desktop).
+	void UpdateGcThresholds();
 	// The latest tick of a GPU-written image's download that will write guest memory overlapping
 	// the range once the GPU completes it (on the priority thread); 0 when none is pending.
 	[[nodiscard]] uint64_t PendingDownloadTick(uint64_t address, uint64_t size);

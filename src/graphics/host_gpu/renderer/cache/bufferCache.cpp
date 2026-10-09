@@ -1261,6 +1261,10 @@ BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
 	    m_slot_buffers.insert(m_graphics, m_scheduler, MemoryUsage::DeviceLocal, 0, AllFlags, 16);
 	EXIT_IF(null_id != NULL_BUFFER_ID);
 	SetVulkanObjectNameF(m_graphics.device, GetBuffer(null_id).Handle(), "Kyty.NullBuffer");
+	UpdateGcThresholds();
+}
+
+void BufferCache::UpdateGcThresholds() {
 	if (!m_graphics.CanReportMemoryUsage()) {
 		return;
 	}
@@ -2223,6 +2227,9 @@ void BufferCache::EraseRetired() {
 void BufferCache::RunGarbageCollector(bool collect) {
 	EraseRetired();
 	const auto tick = m_gc_tick++;
+	if ((tick % 60) == 0) {
+		UpdateGcThresholds();
+	}
 	if (!collect) {
 		return;
 	}

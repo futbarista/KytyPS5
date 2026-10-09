@@ -203,6 +203,9 @@ public:
 	[[nodiscard]] bool TakeRegistrationSpans(std::vector<GuestRange>& spans);
 
 	void               RunGarbageCollector(bool collect = true);
+	// The collection thresholds from the GPU's current memory budget (it shrinks while other programs
+	// use video memory).
+	void               UpdateGcThresholds();
 
 private:
 	friend struct BufferCacheTestAccess;

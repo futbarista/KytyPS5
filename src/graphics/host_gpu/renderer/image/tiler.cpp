@@ -124,9 +124,33 @@ TileManager::Scratch TileManager::AllocateScratch(uint64_t size) {
 	VkBuffer      buffer = VK_NULL_HANDLE;
 	VmaAllocation memory = nullptr;
 	const auto    raw    = static_cast<VkBufferCreateInfo>(create);
-	RequireVulkanSuccess(static_cast<vk::Result>(vmaCreateBuffer(
-	                         m_graphics.allocator, &raw, &allocate, &buffer, &memory, nullptr)),
-	                     "allocate TileManager scratch buffer");
+	auto result = static_cast<vk::Result>(
+	    vmaCreateBuffer(m_graphics.allocator, &raw, &allocate, &buffer, &memory, nullptr));
+	// Out of video memory: without the freed scratch buffers and images kept for reuse, then in
+	// system memory (slower to tile through, but the game goes on).
+	if (result != vk::Result::eSuccess) {
+		{
+			std::scoped_lock lock(m_scratch_mutex);
+			for (const auto& pooled: m_scratch_pool) {
+				vmaDestroyBuffer(m_graphics.allocator, pooled.buffer, pooled.allocation);
+			}
+			m_scratch_pool.clear();
+			m_scratch_pool_bytes = 0;
+		}
+		m_graphics.TrimImagePool();
+		result = static_cast<vk::Result>(
+		    vmaCreateBuffer(m_graphics.allocator, &raw, &allocate, &buffer, &memory, nullptr));
+	}
+	if (result != vk::Result::eSuccess) {
+		allocate.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+		result         = static_cast<vk::Result>(
+		    vmaCreateBuffer(m_graphics.allocator, &raw, &allocate, &buffer, &memory, nullptr));
+		m_graphics.ReportMemoryFallback(result == vk::Result::eSuccess
+		                                    ? "a tiling scratch buffer is in system memory"
+		                                    : "a tiling scratch buffer could not be created",
+		                                capacity);
+	}
+	RequireVulkanSuccess(result, "allocate TileManager scratch buffer");
 	return {buffer, memory, size};
 }
 
