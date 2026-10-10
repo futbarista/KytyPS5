@@ -1,9 +1,21 @@
 #include "graphics/shader/recompiler/backend/spirv/spirvEmitterInternal.h"
 
+#include "local/ui-aspect.h"
+
 #include <algorithm>
 
 namespace Libs::Graphics::ShaderRecompiler::Spirv::Emitter {
 namespace {
+
+// KYTY_UI_ASPECT (renderDraw.cpp narrows Demon's Souls' interface towards the middle of its 3840-wide
+// layer): pixel shaders that place a mask by the pixel's position on screen (the menus' item icons) are
+// given the position the pixel had before narrowing, else the mask misses and the icon is cut away.
+constexpr float UiLayerCentre = 1920.0f;
+bool UiNarrowedFragCoord(const EmitterState& state) {
+	constexpr uint64_t Shaders[] = {0x4d86d2e2bb1b49cdull};
+	return state.stage == ShaderType::Pixel && UiAspectShared::Scale() < 1.0f &&
+	       std::find(std::begin(Shaders), std::end(Shaders), state.program.shader_hash) != std::end(Shaders);
+}
 
 bool UserDataDwordIndex(const EmitterState& state, IR::ScalarReg reg, uint32_t& dword_index) {
 	const auto register_index = IR::RegIndex(reg);
@@ -88,7 +100,18 @@ uint32_t EmitBuiltinU32(ValueEmitContext& ctx, IR::StageInputKind kind, uint32_t
 		                           TypePointer(state, StorageClassInput, TypeF32(state)), pointer,
 		                           variable, ConstantU32(state, component)});
 		state.builder.AddFunction({OpLoad, TypeF32(state), value, pointer});
-		state.builder.AddFunction({OpBitcast, TypeU32(state), bits, value});
+		auto x = value;
+		if (component == 0 && UiNarrowedFragCoord(state)) {
+			// Back to where the pixel is in the interface layer before narrowing: c + (x - c) / scale.
+			const float inverse = 1.0f / UiAspectShared::Scale();
+			const auto  scaled  = state.builder.AllocateId();
+			x                   = state.builder.AllocateId();
+			state.builder.AddFunction(
+			    {OpFMul, TypeF32(state), scaled, value, ConstantF32Value(state, inverse)});
+			state.builder.AddFunction({OpFAdd, TypeF32(state), x, scaled,
+			                           ConstantF32Value(state, UiLayerCentre * (1.0f - inverse))});
+		}
+		state.builder.AddFunction({OpBitcast, TypeU32(state), bits, x});
 		return bits;
 	}
 	if (kind == IR::StageInputKind::BaryCoordSmooth ||

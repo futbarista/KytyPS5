@@ -392,11 +392,11 @@ struct ResolvedDynamicState {
 // fill it and the camera's aspect ratio patched to match): the interface is drawn narrower by 16:9 / that
 // ratio about the centre, so that stretched it keeps its proportions. The game draws its interface into a
 // layer of its own, which the last pass of the frame (CompositePs) reads as texture 0 and blends over the
-// scene into the video-out buffer. Some interface elements come from smaller layers of their own (the item
-// icons' mask, the title screen's fog) that a full-screen draw into the interface layer (LayerVs) reads by
-// screen position. The draws into all of these layers are narrowed, except those that cover a whole layer: the
-// full-screen reads (else they read the narrowed layers off by the narrowing), the fog's generator, and the
-// untextured quad clearing a smaller layer. The layers' addresses, seen in one frame, mark the next frames'.
+// scene into the video-out buffer; the draws into that layer are narrowed. Some elements (text, item icons,
+// highlights) are first drawn into a corner of a smaller scratch layer and copied by a quad over the element
+// that reads it by texture coordinates (LayerVs): the copies are narrowed like the rest, the scratch layers
+// are not. Full-screen draws stay full width (FullScreenVs). The layers' addresses, seen in one frame, mark
+// the next frames'.
 namespace UiAspect {
 constexpr uint64_t                CompositePs = 0x1ad8b5870fe4d3ecULL;
 // The reads of a smaller layer, by their vertex shaders (several pixel shaders share them): quads over the
@@ -406,6 +406,24 @@ constexpr std::array<uint64_t, 2> LayerVs {0xbd39a2eba2d20d8bULL, 0x05ca0d08ae41
 // whole screen) and the plain colour darkening the scene behind menus.
 constexpr std::array<uint64_t, 3> FullScreenVs {0xb6761454c17bea3cULL, 0x05ca0d08ae41fd2eULL, 0x5d9a2e8e34030f35ULL};
 constexpr uint64_t                QuadPs      = 0x36a4fcb0fc83b8f7ULL; // untextured quad (bars, clears)
+// A quad given in the layer's pixels (vertex buffer 0: x, y, z per vertex): the darkening behind menus when it
+// spans the layer, else the glow behind a selected tab or slot (narrowed).
+constexpr uint64_t PixelQuadVs = 0x5d9a2e8e34030f35ULL;
+template<typename Prepared>
+inline bool CoversWidth(const Prepared& prepared) {
+	if (prepared.buffer_sources.empty() || prepared.buffer_sources[0].size < 6 * 3 * sizeof(float)) return false;
+	std::array<float, 6 * 3> vertices {};
+	if (!Libs::LibKernel::Memory::TryReadBackingToHost(prepared.buffer_sources[0].address, vertices.data(),
+	                                                    sizeof(vertices))) {
+		return false;
+	}
+	float low = vertices[0], high = vertices[0];
+	for (size_t i = 0; i < vertices.size(); i += 3) {
+		low  = std::min(low, vertices[i]);
+		high = std::max(high, vertices[i]);
+	}
+	return high - low >= 3800.0f;
+}
 inline std::atomic<uint64_t>      g_layer {0};
 inline std::array<std::atomic<uint64_t>, 4> g_small_layers {};
 inline std::atomic<uint32_t>      g_small_next {0};
@@ -494,7 +512,8 @@ static ResolvedDynamicState ResolveGraphicsDynamicParams(const Buffer& buffer, b
 		scissor.extent = {static_cast<uint32_t>(final_scissor.right - final_scissor.left),
 		                  static_cast<uint32_t>(final_scissor.bottom - final_scissor.top)};
 		if (UiAspect::Scale() < 1.0f && color_count > 0 && UiAspect::Narrow(colors[0]) && !ctx.GetClipControl().clip_disable &&
-		    UiAspect::IsLayer(UiAspect::TargetAddress(colors[0]))) {
+		    UiAspect::TargetAddress(colors[0]) != 0 &&
+		    UiAspect::TargetAddress(colors[0]) == UiAspect::g_layer.load(std::memory_order_relaxed)) {
 			const float scale  = UiAspect::Scale();
 			const float centre = static_cast<float>(framebuffer_extent.width) * 0.5f;
 			viewport.x         = centre + (viewport.x - centre) * scale;
@@ -1551,21 +1570,26 @@ bool RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		                        : 0;
 		const uint64_t vs = state.vs_input_info.stage.program != nullptr ? state.vs_input_info.stage.program->shader_hash
 		                                                                 : 0;
-		const bool layer_read = std::find(UiAspect::LayerVs.begin(), UiAspect::LayerVs.end(), vs) !=
-		                        UiAspect::LayerVs.end();
-		const bool full_screen = std::find(UiAspect::FullScreenVs.begin(), UiAspect::FullScreenVs.end(), vs) !=
-		                         UiAspect::FullScreenVs.end();
 		const bool     has_texture = bindings.pixel.has_value() && !bindings.pixel->images.empty();
+		// 05ca0d08 also draws small pictures (button prompts, 128x128) over their element: only its reads of
+		// a layer (the title's fog) are full-screen.
+		const bool layer_texture = has_texture && bindings.pixel->images[0].desc.info.extent.width >= 512;
+		const bool layer_read = layer_texture && std::find(UiAspect::LayerVs.begin(), UiAspect::LayerVs.end(), vs) !=
+		                                             UiAspect::LayerVs.end();
+		const bool full_screen = std::find(UiAspect::FullScreenVs.begin(), UiAspect::FullScreenVs.end(), vs) !=
+		                             UiAspect::FullScreenVs.end() &&
+		                         (vs != 0x05ca0d08ae41fd2eULL || layer_texture) &&
+		                         (vs != UiAspect::PixelQuadVs || UiAspect::CoversWidth(bindings.vertex));
 		if (ps == UiAspect::CompositePs && has_texture) {
 			UiAspect::g_layer.store(bindings.pixel->images[0].desc.info.data.address, std::memory_order_relaxed);
 			UiAspectShared::g_scene_frames.fetch_add(1, std::memory_order_relaxed);
 		}
-		if (layer_read && has_texture) {
+		if (layer_read) {
 			UiAspect::NoteSmallLayer(bindings.pixel->images[0].desc.info.data.address);
 		}
 		const uint64_t target = state.color_count > 0 ? state.color_info[0].desc.info.data.address : 0;
 		const bool     to_small = UiAspect::IsSmallLayer(target);
-		UiAspect::t_narrow    = !full_screen && !(to_small && ps == UiAspect::QuadPs) &&
+		UiAspect::t_narrow    = !full_screen && !to_small &&
 		                     !UiAspectShared::g_fitting.load(std::memory_order_relaxed);
 	}
 	if (FrameGen::Enabled() && state.vs_input_info.stage.program != nullptr) {
