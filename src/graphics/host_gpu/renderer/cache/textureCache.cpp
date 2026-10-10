@@ -3609,6 +3609,8 @@ void TextureCache::RunGarbageCollector() {
 	if (emergency) {
 		std::printf("VRAM: an allocation did not fit (%u so far), collecting images unused for 8 frames\n", fallbacks);
 		std::fflush(stdout);
+		// The freed images kept for reuse (up to a gigabyte) go first.
+		m_graphics.TrimImagePool();
 	} else if (m_total_used_memory < m_trigger_gc_memory || tick < StaleTicks) {
 		return;
 	}
