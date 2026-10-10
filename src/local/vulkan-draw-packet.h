@@ -42,6 +42,7 @@ struct BufferState {
 };
 struct Color {
     vk::Extent2D extent;
+    uint64_t address = 0; // the guest target's (KYTY_UI_ASPECT)
     uint32_t target_slot = 0;
     bool image_id = false;
     auto Extent() const { return extent; }
