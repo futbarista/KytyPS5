@@ -37,6 +37,7 @@
 #include "live-counters.h"
 #include "device-fault.h"
 #include "frame-capture.h"
+#include "ui-aspect.h"
 #include "frame-gen.h"
 #include "native-preparation-state.h"
 #include "slow-log.h"
@@ -392,14 +393,18 @@ struct ResolvedDynamicState {
 // ratio about the centre, so that stretched it keeps its proportions. The game draws its interface into a
 // layer of its own, which the last pass of the frame (CompositePs) reads as texture 0 and blends over the
 // scene into the video-out buffer. Some interface elements come from smaller layers of their own (the item
-// icons' mask, the title screen's fog) that a full-screen draw into the interface layer (LayerPs) reads by
+// icons' mask, the title screen's fog) that a full-screen draw into the interface layer (LayerVs) reads by
 // screen position. The draws into all of these layers are narrowed, except those that cover a whole layer: the
 // full-screen reads (else they read the narrowed layers off by the narrowing), the fog's generator, and the
 // untextured quad clearing a smaller layer. The layers' addresses, seen in one frame, mark the next frames'.
 namespace UiAspect {
 constexpr uint64_t                CompositePs = 0x1ad8b5870fe4d3ecULL;
-constexpr std::array<uint64_t, 2> LayerPs {0xfbb1e69b2c2c0abdULL, 0xa6b124d2b1ba4b7eULL};
-constexpr uint64_t                FogPs       = 0x3a2eb41bacc0239fULL; // the title screen's fog
+// The reads of a smaller layer, by their vertex shaders (several pixel shaders share them): quads over the
+// elements (text, item icons) read at their screen position, narrowed like the layer's contents.
+constexpr std::array<uint64_t, 2> LayerVs {0xbd39a2eba2d20d8bULL, 0x05ca0d08ae41fd2eULL};
+// Full-screen draws, kept full width: the title screen's fog (generated into its layer and read back over the
+// whole screen) and the plain colour darkening the scene behind menus.
+constexpr std::array<uint64_t, 3> FullScreenVs {0xb6761454c17bea3cULL, 0x05ca0d08ae41fd2eULL, 0x5d9a2e8e34030f35ULL};
 constexpr uint64_t                QuadPs      = 0x36a4fcb0fc83b8f7ULL; // untextured quad (bars, clears)
 inline std::atomic<uint64_t>      g_layer {0};
 inline std::array<std::atomic<uint64_t>, 4> g_small_layers {};
@@ -427,13 +432,17 @@ inline uint64_t TargetAddress(const Color& color) {
 		return color.address;
 	}
 }
+// A recorded draw replays on another thread: it carries the decision made where it was prepared.
+template<typename Color>
+inline bool Narrow(const Color& color) {
+	if constexpr (requires { color.narrow; }) {
+		return color.narrow;
+	} else {
+		return t_narrow;
+	}
+}
 inline float Scale() {
-	static const float scale = [] {
-		const char* text  = std::getenv("KYTY_UI_ASPECT");
-		const float ratio = text != nullptr ? std::strtof(text, nullptr) : 0.0f;
-		return ratio > 16.0f / 9.0f ? (16.0f / 9.0f) / ratio : 1.0f;
-	}();
-	return scale;
+	return UiAspectShared::Scale();
 }
 } // namespace UiAspect
 
@@ -484,7 +493,7 @@ static ResolvedDynamicState ResolveGraphicsDynamicParams(const Buffer& buffer, b
 		scissor.offset = {final_scissor.left, final_scissor.top};
 		scissor.extent = {static_cast<uint32_t>(final_scissor.right - final_scissor.left),
 		                  static_cast<uint32_t>(final_scissor.bottom - final_scissor.top)};
-		if (UiAspect::Scale() < 1.0f && color_count > 0 && UiAspect::t_narrow && !ctx.GetClipControl().clip_disable &&
+		if (UiAspect::Scale() < 1.0f && color_count > 0 && UiAspect::Narrow(colors[0]) && !ctx.GetClipControl().clip_disable &&
 		    UiAspect::IsLayer(UiAspect::TargetAddress(colors[0]))) {
 			const float scale  = UiAspect::Scale();
 			const float centre = static_cast<float>(framebuffer_extent.width) * 0.5f;
@@ -736,7 +745,7 @@ static DynamicState Capture(const CommandBuffer& buffer, const ShaderVertexInput
     state.color_count = color_count;
     for (uint32_t i = 0; i < color_count; ++i)
         state.colors[i] = {colors[i].Extent(), colors[i].desc.info.data.address, colors[i].target_slot,
-                           bool(colors[i].image_id)};
+                           bool(colors[i].image_id), UiAspect::t_narrow};
     state.depth.desc.info.extent = {depth.desc.info.extent.width, depth.desc.info.extent.height};
     state.depth.desc.view_info.format = depth.desc.view_info.format;
     state.depth.stencil_dynamic_front = depth.stencil_dynamic_front;
@@ -1540,19 +1549,24 @@ bool RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		const uint64_t ps = state.ps_active && state.ps_input_info.stage.program != nullptr
 		                        ? state.ps_input_info.stage.program->shader_hash
 		                        : 0;
-		const bool     layer_read = std::find(UiAspect::LayerPs.begin(), UiAspect::LayerPs.end(), ps) !=
-		                        UiAspect::LayerPs.end();
+		const uint64_t vs = state.vs_input_info.stage.program != nullptr ? state.vs_input_info.stage.program->shader_hash
+		                                                                 : 0;
+		const bool layer_read = std::find(UiAspect::LayerVs.begin(), UiAspect::LayerVs.end(), vs) !=
+		                        UiAspect::LayerVs.end();
+		const bool full_screen = std::find(UiAspect::FullScreenVs.begin(), UiAspect::FullScreenVs.end(), vs) !=
+		                         UiAspect::FullScreenVs.end();
 		const bool     has_texture = bindings.pixel.has_value() && !bindings.pixel->images.empty();
 		if (ps == UiAspect::CompositePs && has_texture) {
 			UiAspect::g_layer.store(bindings.pixel->images[0].desc.info.data.address, std::memory_order_relaxed);
+			UiAspectShared::g_scene_frames.fetch_add(1, std::memory_order_relaxed);
 		}
 		if (layer_read && has_texture) {
 			UiAspect::NoteSmallLayer(bindings.pixel->images[0].desc.info.data.address);
 		}
 		const uint64_t target = state.color_count > 0 ? state.color_info[0].desc.info.data.address : 0;
 		const bool     to_small = UiAspect::IsSmallLayer(target);
-		const bool     fog    = ps == UiAspect::FogPs;
-		UiAspect::t_narrow    = !layer_read && !fog && !(to_small && ps == UiAspect::QuadPs);
+		UiAspect::t_narrow    = !full_screen && !(to_small && ps == UiAspect::QuadPs) &&
+		                     !UiAspectShared::g_fitting.load(std::memory_order_relaxed);
 	}
 	if (FrameGen::Enabled() && state.vs_input_info.stage.program != nullptr) {
 		FrameGen::OnDraw(state.vs_input_info.stage.program->shader_hash,

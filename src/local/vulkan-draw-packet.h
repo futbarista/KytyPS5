@@ -45,6 +45,7 @@ struct Color {
     uint64_t address = 0; // the guest target's (KYTY_UI_ASPECT)
     uint32_t target_slot = 0;
     bool image_id = false;
+    bool narrow = false; // drawn narrower (KYTY_UI_ASPECT), decided where the draw was prepared
     auto Extent() const { return extent; }
 };
 struct Depth {
