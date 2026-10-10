@@ -10,6 +10,8 @@
 #include <mutex>
 #include <unordered_set>
 
+#include "ui-aspect.h"
+
 namespace Libs {
 
 LIB_VERSION("Videodec2", 1, "Videodec2", 1, 1);
@@ -461,6 +463,7 @@ static int32_t KYTY_SYSV_ABI Decode(Videodec2Decoder decoder, const Videodec2Inp
                                     Videodec2FrameBuffer* frame_buffer,
                                     Videodec2OutputInfo*  output_info) {
 	PRINT_NAME();
+	UiAspectShared::NoteVideoFrame(); // KYTY_UI_ASPECT: a movie plays, shown 16:9
 
 	auto* state = GetDecoder(decoder);
 	if (state == nullptr) {
