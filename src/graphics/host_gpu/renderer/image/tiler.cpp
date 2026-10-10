@@ -95,8 +95,14 @@ TileManager::~TileManager() {
 	}
 }
 
-// Scratch capacities are powers of two from 64 KiB, so buffers of similar requests are reused.
+// Scratch capacities are powers of two from 64 KiB, so buffers of similar requests are reused. Past
+// 256 MiB they are whole MiB instead: a 1.5 GiB texture array's power of two (2 GiB) is the largest
+// allocation an RX 9070 XT allows (maxMemoryAllocationSize), and such buffers are not pooled anyway.
 static uint64_t ScratchCapacity(uint64_t size) {
+	constexpr uint64_t MiB = uint64_t {1} << 20u;
+	if (size > 256 * MiB) {
+		return (size + MiB - 1) & ~(MiB - 1);
+	}
 	return std::max<uint64_t>(uint64_t {1} << 16u, std::bit_ceil(size));
 }
 
