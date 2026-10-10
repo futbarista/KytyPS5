@@ -51,6 +51,10 @@ public:
 		m_free.push_back(id);
 	}
 
+	[[nodiscard]] size_t Size() const noexcept { return m_size - m_free.size(); }
+	// The tick of the least recently used item (0 when empty).
+	[[nodiscard]] Tick OldestTick() const noexcept { return m_first == nullptr ? Tick {} : m_first->tick; }
+
 	template <typename Function>
 	void ForEachItemBelow(Tick tick, Function&& function) {
 		constexpr bool ReturnsBool = std::is_same_v<std::invoke_result_t<Function, Object>, bool>;

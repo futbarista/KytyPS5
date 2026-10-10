@@ -324,14 +324,24 @@ static void DestroyImagePool(VmaAllocator allocator) {
 	g_image_pool_bytes = 0;
 }
 
+uint64_t GraphicContext::ImagePoolBytes() {
+	std::scoped_lock lock(g_image_pool_mutex);
+	return g_image_pool_bytes;
+}
+
 void GraphicContext::TrimImagePool() {
 	if (allocator != nullptr) DestroyImagePool(allocator);
 }
 
+static std::atomic<uint32_t> g_memory_fallbacks {0};
+
+uint32_t GraphicContext::MemoryFallbacks() noexcept {
+	return g_memory_fallbacks.load(std::memory_order_relaxed);
+}
+
 // Out of video memory: the first few times say so in the log, with the heaps' budgets.
 void GraphicContext::ReportMemoryFallback(const char* what, uint64_t bytes) const {
-	static std::atomic<uint32_t> reported {0};
-	if (reported.fetch_add(1, std::memory_order_relaxed) >= 8) return;
+	if (g_memory_fallbacks.fetch_add(1, std::memory_order_relaxed) >= 8) return;
 	std::printf("Vulkan: video memory full, %s (%" PRIu64 " bytes)\n", what, bytes);
 	VmaBudget budgets[VK_MAX_MEMORY_HEAPS] {};
 	vmaGetHeapBudgets(allocator, budgets);

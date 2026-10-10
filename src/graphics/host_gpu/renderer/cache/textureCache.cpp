@@ -381,6 +381,7 @@ void TextureCache::RegisterImage(ImageId id) {
 	++image.registrations;
 	image.lru_id     = m_lru_cache.Insert(id, m_gc_tick);
 	m_total_used_memory += image.AccountedSize();
+	m_image_bytes += image.AccountedSize();
 }
 
 void TextureCache::UnregisterImage(ImageId id) {
@@ -415,6 +416,7 @@ void TextureCache::UnregisterImage(ImageId id) {
 		EXIT("TextureCache: image accounting underflow\n");
 	}
 	m_total_used_memory -= accounted;
+	m_image_bytes -= std::min(accounted, m_image_bytes);
 	image.registered = false;
 }
 
@@ -3568,10 +3570,15 @@ void TextureCache::RunGarbageCollector() {
 	if (m_graphics.CanReportMemoryUsage()) {
 		m_total_used_memory = m_graphics.GetDeviceMemoryUsage();
 		if ((tick % 600) == 0) {
-			std::printf("VRAM: %llu MiB in use, budget %llu MiB (collect from %llu MiB)\n",
+			std::printf("VRAM: %llu MiB in use, budget %llu MiB (collect from %llu MiB); "
+			            "images %llu MiB (%zu, oldest unused %llu frames), buffers %llu MiB, image pool %llu MiB\n",
 			            static_cast<unsigned long long>(m_total_used_memory >> 20u),
 			            static_cast<unsigned long long>(m_graphics.GetTotalMemoryBudget() >> 20u),
-			            static_cast<unsigned long long>(m_trigger_gc_memory >> 20u));
+			            static_cast<unsigned long long>(m_trigger_gc_memory >> 20u),
+			            static_cast<unsigned long long>(m_image_bytes >> 20u), m_lru_cache.Size(),
+			            static_cast<unsigned long long>(tick - std::min<uint64_t>(m_lru_cache.OldestTick(), tick)),
+			            static_cast<unsigned long long>(m_buffer_cache.BufferBytes() >> 20u),
+			            static_cast<unsigned long long>(GraphicContext::ImagePoolBytes() >> 20u));
 			std::fflush(stdout);
 		}
 	}
@@ -3591,7 +3598,18 @@ void TextureCache::RunGarbageCollector() {
 	// come back after a few seconds (160 flips: 5-7 MB of uploads a frame instead of 0.2-1.7, 1% low 47 -> 27 fps).
 	constexpr uint64_t StaleTicks   = 600;
 	constexpr size_t   MaxDeletions = 40;
-	if (m_total_used_memory < m_trigger_gc_memory || tick < StaleTicks) {
+	// An allocation since the last flip did not fit in video memory (it went to system memory): the budget estimate
+	// was above what the GPU really has, so the images not used for a few flips go now, before an allocation
+	// without a fallback (a depth image) fails.
+	const uint32_t fallbacks = GraphicContext::MemoryFallbacks();
+	const bool     emergency = fallbacks != m_seen_memory_fallbacks;
+	m_seen_memory_fallbacks  = fallbacks;
+	const uint64_t stale     = std::min<uint64_t>(emergency ? 8 : StaleTicks, tick);
+	const size_t   limit     = emergency ? 200 : MaxDeletions;
+	if (emergency) {
+		std::printf("VRAM: an allocation did not fit (%u so far), collecting images unused for 8 frames\n", fallbacks);
+		std::fflush(stdout);
+	} else if (m_total_used_memory < m_trigger_gc_memory || tick < StaleTicks) {
 		return;
 	}
 	// An image the collector keeps (a depth image with its stencil association; one the GPU wrote, tiled: no download
@@ -3599,19 +3617,19 @@ void TextureCache::RunGarbageCollector() {
 	// first images from the front were only those (until 10-09 no image was collected on any GPU). Deleting depth
 	// deletes its stencil association too, so the traversal ends first.
 	std::vector<ImageId> candidates;
-	candidates.reserve(MaxDeletions);
-	m_lru_cache.ForEachItemBelow(tick - StaleTicks, [&](ImageId id) {
+	candidates.reserve(limit);
+	m_lru_cache.ForEachItemBelow(tick - stale, [&](ImageId id) {
 		const auto* owner = m_slot_images.try_get(id);
 		if (owner == nullptr || !owner->registered || owner->depth_id ||
 		    (owner->IsGpuModified() && owner->info.IsTiled() && SafeToDownload(*owner))) {
 			return false;
 		}
 		candidates.push_back(id);
-		return candidates.size() == MaxDeletions;
+		return candidates.size() == limit;
 	});
 	for (const auto id: candidates) {
 		auto owner = m_slot_images.try_get(id);
-		if (m_total_used_memory < m_trigger_gc_memory) {
+		if (!emergency && m_total_used_memory < m_trigger_gc_memory) {
 			break;
 		}
 		if (owner == nullptr || !owner->registered) {

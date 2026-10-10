@@ -206,6 +206,8 @@ public:
 	// The collection thresholds from the GPU's current memory budget (it shrinks while other programs
 	// use video memory).
 	void               UpdateGcThresholds();
+	// The cached buffers' bytes (for the log).
+	[[nodiscard]] uint64_t BufferBytes() const noexcept { return m_buffer_bytes; }
 
 private:
 	friend struct BufferCacheTestAccess;
@@ -341,6 +343,7 @@ public:
 
 private:
 	uint64_t                                          m_total_used_memory  = 0;
+	uint64_t                                          m_buffer_bytes       = 0;
 	uint64_t m_trigger_gc_memory  = 1ull * 1024 * 1024 * 1024;
 	uint64_t m_critical_gc_memory = 2ull * 1024 * 1024 * 1024;
 	uint64_t m_gc_tick            = 0;

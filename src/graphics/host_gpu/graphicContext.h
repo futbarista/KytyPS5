@@ -157,6 +157,11 @@ struct GraphicContext {
 	}
 	std::vector<vk::DeviceMemory> simulation_ballast;
 	uint64_t                      simulation_ballast_bytes = 0;
+	// How many allocations so far did not fit in video memory (the collectors free memory at once
+	// when it grows: the budget estimate was too high).
+	[[nodiscard]] static uint32_t MemoryFallbacks() noexcept;
+	// The freed images kept for reuse (KYTY_IMAGE_POOL).
+	[[nodiscard]] static uint64_t ImagePoolBytes();
 	void                   AppendHardwareRayTracingDeviceExtensions(
 	    const std::vector<vk::ExtensionProperties>& available_extensions,
 	    std::vector<const char*>&                   device_extensions);

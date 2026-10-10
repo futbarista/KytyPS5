@@ -910,6 +910,7 @@ void BufferCache::ChangeRegister(BufferId id) {
 		(void)it;
 		EXIT_IF(!inserted);
 		m_total_used_memory += buffer.Size();
+		m_buffer_bytes += buffer.Size();
 		buffer.lru_id = m_lru_cache.Insert(id, m_gc_tick);
 		std::vector<vk::DeviceAddress> addresses;
 		addresses.reserve(size_pages);
@@ -924,6 +925,7 @@ void BufferCache::ChangeRegister(BufferId id) {
 		m_buffers.erase(found);
 		EXIT_IF(buffer.Size() > m_total_used_memory);
 		m_total_used_memory -= buffer.Size();
+		m_buffer_bytes -= std::min<uint64_t>(buffer.Size(), m_buffer_bytes);
 		m_lru_cache.Free(buffer.lru_id);
 		m_bda_pagetable_buffer.Fill(pages.first * sizeof(vk::DeviceAddress),
 		                            size_pages * sizeof(vk::DeviceAddress), 0);
@@ -2230,11 +2232,16 @@ void BufferCache::RunGarbageCollector(bool collect) {
 	if ((tick % 60) == 0) {
 		UpdateGcThresholds();
 	}
-	if (!collect) {
-		return;
-	}
 	if (m_graphics.CanReportMemoryUsage()) {
 		m_total_used_memory = m_graphics.GetDeviceMemoryUsage();
+	}
+	// After a frame with BDA shaders only the buffers unused for ten seconds go, and only when video
+	// memory is critical: Demon's Souls has such shaders in nearly every frame, and without this the
+	// buffers only ever grew until the GPU ran out of memory (a buffer collected under such a shader
+	// faults back).
+	const bool bda_frame = !collect;
+	if (bda_frame && m_total_used_memory < m_critical_gc_memory) {
+		return;
 	}
 	if (m_total_used_memory < m_trigger_gc_memory) {
 		return;
@@ -2244,8 +2251,8 @@ void BufferCache::RunGarbageCollector(bool collect) {
 	DrainGuestReadback();
 
 	const bool     aggressive = m_total_used_memory >= m_critical_gc_memory;
-	const uint64_t age        = std::min<uint64_t>(aggressive ? 80 : 160, tick);
-	const size_t   limit      = aggressive ? 64 : 32;
+	const uint64_t age        = std::min<uint64_t>(bda_frame ? 600 : aggressive ? 80 : 160, tick);
+	const size_t   limit      = bda_frame ? 16 : aggressive ? 64 : 32;
 
 	std::vector<BufferId> dirty_buffers;
 	std::vector<DownloadCopy> copies;
