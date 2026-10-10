@@ -59,6 +59,8 @@
 #include <vector>
 #include <xxhash.h>
 
+#include "prefetch-wait.h"
+
 extern "C" {
 // 1: find graphics pipelines through a block-hashed index of the full key.
 volatile std::atomic<uint32_t> kyty_local_pipeline_index_mode {0};
@@ -477,6 +479,7 @@ struct PipelineCache::ProgramCache {
 	// starts the translation.
 	void StartPrefetch(std::filesystem::path path, std::string identity, std::vector<ProgramKey> warm) {
 		prefetch         = std::make_unique<Prefetch>();
+		PrefetchWait::g_state.store(PrefetchWait::Loading, std::memory_order_release);
 		prefetch->loader = std::thread([this, path = std::move(path), identity = std::move(identity),
 		                                warm = std::move(warm)] {
 			LocalPlatform::SetThreadName("Kyty.Prefetch");
@@ -486,6 +489,7 @@ struct PipelineCache::ProgramCache {
 			if (!std::filesystem::exists(path) || !p.inputs.Open(path, identity) || p.inputs.records.empty()) {
 				PipelineCacheLog("Shader prefetch: no inputs for this GPU and driver in {} (precompile-windows.ps1 "
 				                 "writes them)", Common::PathToString(path));
+				PrefetchWait::g_state.store(PrefetchWait::Finished, std::memory_order_release);
 				return;
 			}
 			const std::unordered_set<ProgramKey, ProgramKeyHash> skip(warm.begin(), warm.end());
@@ -510,15 +514,21 @@ struct PipelineCache::ProgramCache {
 			p.spill = LocalPlatform::OpenScratchFile();
 			if (p.spill == 0) {
 				PipelineCacheLog("Shader prefetch: no temporary file for the SPIR-V");
+				PrefetchWait::g_state.store(PrefetchWait::Finished, std::memory_order_release);
 				return;
 			}
-			uint32_t threads = std::max(2u, std::thread::hardware_concurrency() / 2u);
+			// Waited for before the game starts (KYTY_SHADER_PREFETCH_WAIT): all CPU threads, nothing else runs.
+			uint32_t threads = PrefetchWait::Requested() ? std::max(2u, std::thread::hardware_concurrency())
+			                                             : std::max(2u, std::thread::hardware_concurrency() / 2u);
 			if (const char* value = std::getenv("KYTY_SHADER_PREFETCH_THREADS"); value != nullptr && *value != '\0')
 				threads = std::clamp(static_cast<uint32_t>(std::strtoul(value, nullptr, 10)), 1u, 64u);
 			PipelineCacheLog("Shader prefetch: {} programs ({} inputs) to translate on {} threads, loaded in {} ms",
 			                 p.groups.size(), p.inputs.records.size(), threads,
 			                 std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - begin).count());
 			p.ready.store(true, std::memory_order_release);
+			PrefetchWait::g_total.store(p.groups.size(), std::memory_order_relaxed);
+			PrefetchWait::g_state.store(p.groups.empty() ? PrefetchWait::Finished : PrefetchWait::Running,
+			                            std::memory_order_release);
 			for (uint32_t t = 0; t < threads; ++t) p.threads.emplace_back([this] { PrefetchWork(); });
 		});
 	}
@@ -536,7 +546,10 @@ struct PipelineCache::ProgramCache {
 				group.state.store(Prefetch::Done, std::memory_order_release);
 				group.state.notify_all();
 			}
-			if (p.finished.fetch_add(1, std::memory_order_relaxed) + 1 == p.groups.size()) {
+			const size_t finished = p.finished.fetch_add(1, std::memory_order_relaxed) + 1;
+			PrefetchWait::g_done.store(finished, std::memory_order_relaxed);
+			if (finished == p.groups.size()) {
+				PrefetchWait::g_state.store(PrefetchWait::Finished, std::memory_order_release);
 				PipelineCacheLog("Shader prefetch: all {} programs translated, {} MiB of SPIR-V", p.groups.size(),
 				                 p.spill_end.load(std::memory_order_relaxed) >> 20u);
 				std::vector<std::vector<uint32_t>>().swap(p.inputs.records); // no longer read

@@ -17,6 +17,10 @@
 #include "kernel/memory.h"
 #include "kernel/pthread.h"
 #include "loader/demonsSoulsAspect.h"
+#include "prefetch-wait.h"
+#include <thread>
+#include <chrono>
+#include "startup-progress.h"
 #include "loader/demonsSoulsIdle.h"
 #include "loader/demonsSoulsCopy.h"
 #include "loader/demonsSoulsGpuPages.h"
@@ -1615,6 +1619,22 @@ void RuntimeLinker::Execute(const std::filesystem::path& game_patch) {
 	for (auto* program : m_programs) DemonsSoulsCopy::Install(program);
 	DemonsSoulsGpuPages::Install(m_programs.empty() ? nullptr : m_programs.front());
 	DemonsSoulsSceneGuard::Install(m_programs.empty() ? nullptr : m_programs.front());
+	// KYTY_SHADER_PREFETCH_WAIT: the whole game's shaders first, their progress on the start-up screen.
+	if (PrefetchWait::Requested()) {
+		const auto begin = std::chrono::steady_clock::now();
+		for (uint32_t state; (state = PrefetchWait::g_state.load(std::memory_order_acquire)) != PrefetchWait::Finished;) {
+			// Not started at all, or still loading its inputs after a minute: the game starts.
+			if (state == PrefetchWait::NotStarted ||
+			    (state == PrefetchWait::Loading && std::chrono::steady_clock::now() - begin > std::chrono::minutes(1)))
+				break;
+			StartupProgress::Report("Preparing shaders before the game", PrefetchWait::g_done.load(std::memory_order_relaxed),
+			                        PrefetchWait::g_total.load(std::memory_order_relaxed));
+			std::this_thread::sleep_for(std::chrono::milliseconds(50));
+		}
+		std::printf("Shader prefetch: the game starts after %lld s of waiting for it\n",
+		            static_cast<long long>(
+		                std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - begin).count()));
+	}
 	StartAllModules();
 
 	LOGF_COLOR(Log::Color::BrightYellow, "---\n--- Execute: %s\n---\n", "Main");
