@@ -17,6 +17,7 @@
 #include "vulkan-recording.h"
 #endif
 #include "frame-gen.h"
+#include "ui-aspect.h"
 
 #include <algorithm>
 #include <array>
@@ -737,7 +738,9 @@ void Swapchain::RecordPresentCommands(CommandBuffer& command, VulkanImage& sourc
 	}();
 	int dst_x = 0, dst_y = 0;
 	int dst_w = static_cast<int>(m_extent.width), dst_h = static_cast<int>(m_extent.height);
-	if (aspect_fit && source.extent.width != 0 && source.extent.height != 0) {
+	// KYTY_UI_ASPECT: frames without the game's scene (logos, movies) keep 16:9.
+	const bool fit = UiAspectShared::FitWithoutScene() || aspect_fit;
+	if (fit && source.extent.width != 0 && source.extent.height != 0) {
 		const double scale = std::min(static_cast<double>(m_extent.width) / source.extent.width,
 		                              static_cast<double>(m_extent.height) / source.extent.height);
 		dst_w = std::max(1, static_cast<int>(std::lround(source.extent.width * scale)));
