@@ -51,6 +51,7 @@
 #include <atomic>
 #include <bit>
 #include <cmath>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <limits>
@@ -385,6 +386,56 @@ struct ResolvedDynamicState {
 	std::array<vk::Bool32, RENDER_COLOR_ATTACHMENTS_MAX> color_write {};
 };
 
+// KYTY_UI_ASPECT=<screen width / height> (Demon's Souls on an ultrawide screen, its 16:9 image stretched to
+// fill it and the camera's aspect ratio patched to match): the interface is drawn narrower by 16:9 / that
+// ratio about the centre, so that stretched it keeps its proportions. The game draws its interface into a
+// layer of its own, which the last pass of the frame (CompositePs) reads as texture 0 and blends over the
+// scene into the video-out buffer. Some interface elements come from smaller layers of their own (the item
+// icons' mask, the title screen's fog) that a full-screen draw into the interface layer (LayerPs) reads by
+// screen position. The draws into all of these layers are narrowed, except those that cover a whole layer: the
+// full-screen reads (else they read the narrowed layers off by the narrowing), the fog's generator, and the
+// untextured quad clearing a smaller layer. The layers' addresses, seen in one frame, mark the next frames'.
+namespace UiAspect {
+constexpr uint64_t                CompositePs = 0x1ad8b5870fe4d3ecULL;
+constexpr std::array<uint64_t, 2> LayerPs {0xfbb1e69b2c2c0abdULL, 0xa6b124d2b1ba4b7eULL};
+constexpr uint64_t                FogPs       = 0x3a2eb41bacc0239fULL; // the title screen's fog
+constexpr uint64_t                QuadPs      = 0x36a4fcb0fc83b8f7ULL; // untextured quad (bars, clears)
+inline std::atomic<uint64_t>      g_layer {0};
+inline std::array<std::atomic<uint64_t>, 4> g_small_layers {};
+inline std::atomic<uint32_t>      g_small_next {0};
+inline thread_local bool          t_narrow = false;
+inline bool IsSmallLayer(uint64_t address) {
+	if (address == 0) return false;
+	for (const auto& layer: g_small_layers)
+		if (layer.load(std::memory_order_relaxed) == address) return true;
+	return false;
+}
+inline void NoteSmallLayer(uint64_t address) {
+	if (address == 0 || IsSmallLayer(address)) return;
+	g_small_layers[g_small_next.fetch_add(1, std::memory_order_relaxed) % g_small_layers.size()].store(
+	    address, std::memory_order_relaxed);
+}
+inline bool IsLayer(uint64_t address) {
+	return address != 0 && (address == g_layer.load(std::memory_order_relaxed) || IsSmallLayer(address));
+}
+template<typename Color>
+inline uint64_t TargetAddress(const Color& color) {
+	if constexpr (requires { color.desc.info.data.address; }) {
+		return color.desc.info.data.address;
+	} else {
+		return color.address;
+	}
+}
+inline float Scale() {
+	static const float scale = [] {
+		const char* text  = std::getenv("KYTY_UI_ASPECT");
+		const float ratio = text != nullptr ? std::strtof(text, nullptr) : 0.0f;
+		return ratio > 16.0f / 9.0f ? (16.0f / 9.0f) / ratio : 1.0f;
+	}();
+	return scale;
+}
+} // namespace UiAspect
+
 template<typename Buffer, typename Color, typename Depth>
 static ResolvedDynamicState ResolveGraphicsDynamicParams(const Buffer& buffer, bool indexed_viewports,
                                                          const Color* colors, uint32_t color_count,
@@ -432,6 +483,20 @@ static ResolvedDynamicState ResolveGraphicsDynamicParams(const Buffer& buffer, b
 		scissor.offset = {final_scissor.left, final_scissor.top};
 		scissor.extent = {static_cast<uint32_t>(final_scissor.right - final_scissor.left),
 		                  static_cast<uint32_t>(final_scissor.bottom - final_scissor.top)};
+		if (UiAspect::Scale() < 1.0f && color_count > 0 && UiAspect::t_narrow && !ctx.GetClipControl().clip_disable &&
+		    UiAspect::IsLayer(UiAspect::TargetAddress(colors[0]))) {
+			const float scale  = UiAspect::Scale();
+			const float centre = static_cast<float>(framebuffer_extent.width) * 0.5f;
+			viewport.x         = centre + (viewport.x - centre) * scale;
+			viewport.width *= scale;
+			const auto narrow = [&](int32_t x) {
+				return static_cast<int32_t>(std::lround(centre + (static_cast<float>(x) - centre) * scale));
+			};
+			const int32_t left  = std::max(narrow(scissor.offset.x), 0);
+			const int32_t right = std::max(narrow(scissor.offset.x + static_cast<int32_t>(scissor.extent.width)), left);
+			scissor.offset.x     = left;
+			scissor.extent.width = static_cast<uint32_t>(right - left);
+		}
 		if (viewport.width == 0.0f) {
 			// Keep empty slots at their guest index; Vulkan requires a positive viewport width.
 			viewport.width = 1.0f;
@@ -669,7 +734,8 @@ static DynamicState Capture(const CommandBuffer& buffer, const ShaderVertexInput
         {limits.maxViewportDimensions[0], limits.maxViewportDimensions[1]}};
     state.color_count = color_count;
     for (uint32_t i = 0; i < color_count; ++i)
-        state.colors[i] = {colors[i].Extent(), colors[i].target_slot, bool(colors[i].image_id)};
+        state.colors[i] = {colors[i].Extent(), colors[i].desc.info.data.address, colors[i].target_slot,
+                           bool(colors[i].image_id)};
     state.depth.desc.info.extent = {depth.desc.info.extent.width, depth.desc.info.extent.height};
     state.depth.desc.view_info.format = depth.desc.view_info.format;
     state.depth.stencil_dynamic_front = depth.stencil_dynamic_front;
@@ -1468,6 +1534,24 @@ bool RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	                            state.ps_active, bindings);
 	if (FrameCapture::Active()) {
 		CaptureFrameDraw(buffer, draw, state, bindings.vertex, bindings.pixel);
+	}
+	if (UiAspect::Scale() < 1.0f) {
+		const uint64_t ps = state.ps_active && state.ps_input_info.stage.program != nullptr
+		                        ? state.ps_input_info.stage.program->shader_hash
+		                        : 0;
+		const bool     layer_read = std::find(UiAspect::LayerPs.begin(), UiAspect::LayerPs.end(), ps) !=
+		                        UiAspect::LayerPs.end();
+		const bool     has_texture = bindings.pixel.has_value() && !bindings.pixel->images.empty();
+		if (ps == UiAspect::CompositePs && has_texture) {
+			UiAspect::g_layer.store(bindings.pixel->images[0].desc.info.data.address, std::memory_order_relaxed);
+		}
+		if (layer_read && has_texture) {
+			UiAspect::NoteSmallLayer(bindings.pixel->images[0].desc.info.data.address);
+		}
+		const uint64_t target = state.color_count > 0 ? state.color_info[0].desc.info.data.address : 0;
+		const bool     to_small = UiAspect::IsSmallLayer(target);
+		const bool     fog    = ps == UiAspect::FogPs;
+		UiAspect::t_narrow    = !layer_read && !fog && !(to_small && ps == UiAspect::QuadPs);
 	}
 	if (FrameGen::Enabled() && state.vs_input_info.stage.program != nullptr) {
 		FrameGen::OnDraw(state.vs_input_info.stage.program->shader_hash,
