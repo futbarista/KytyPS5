@@ -18,7 +18,8 @@ LANGUAGES = ['Japanese', 'English (United States)', 'French (France)', 'Spanish 
              'Swedish', 'Danish', 'Norwegian', 'Polish', 'Portuguese (Brazil)', 'English (United Kingdom)', 'Turkish',
              'Spanish (Latin America)', 'Arabic', 'French (Canada)', 'Czech', 'Hungarian', 'Greek', 'Romanian', 'Thai',
              'Vietnamese', 'Indonesian']
-RESOLUTIONS = ['1280x720', '1920x1080', '2560x1440', '3840x2160']
+RESOLUTIONS = ['1280x720', '1920x1080', '2560x1440', '3840x2160', '2560x1080 (21:9)', '3440x1440 (21:9)', '3840x1600 (21:9)',
+               '5120x1440 (32:9)']
 # The height Demon's Souls renders its 3D at (run.sh --render-height); its output and UI stay 3840x2160.
 RENDER_HEIGHTS = ['1440 (PS5)', '1296', '1152', '1080', '900']
 
@@ -36,13 +37,19 @@ efficiency = kc.efficiency_mask()
 
 
 def play_command():
-	width, height = settings['resolution'].split('x')
+	width, height = settings['resolution'].split(' ')[0].split('x')
+	# Wider than 16:9 (ultrawide): the image fills the screen, the camera's aspect ratio follows it and the interface
+	# keeps its proportions (KYTY_UI_ASPECT); 16:9 resolutions stay plain 16:9.
+	ratio = int(width) / int(height)
+	ultrawide = ratio > 1.8
 	args = [sys.executable, os.path.join(ROOT, 'run-linux.py'), '--prompt', '--follow', '--width', width,
 	        '--height', height, '--language', str(settings['language'])]
 	if settings['fullscreen']:
 		args.append('--fullscreen')
-		if settings['aspect']:
+		if settings['aspect'] and not ultrawide:
 			args.append('--aspect-fit')
+	if ultrawide:
+		args += ['--ui-aspect', f'{ratio:.6g}']
 	if settings['fps120']:
 		args.append('--fps120')
 	if settings['fpshud']:

@@ -20,6 +20,7 @@
 #   ./run.sh --prompt                 a dialog first when the game version is untested or the shaders are not
 #                                     precompiled for this GPU (run.sh passes it)
 #   ./run.sh --follow                 stay open showing the run log until the game exits, then its exit code
+#   ./run.sh --width 3440 --height 1440 --ui-aspect 2.3889   ultrawide (21:9): wider camera, interface in proportion
 #   ./run.sh --fps-hud                the game's frames a second in the corner of the window
 #   ./run.sh --dry-run                print environment and command only
 # --no-redzone is accepted and does nothing: the red-zone protection is for Windows, whose exception dispatch
@@ -58,6 +59,7 @@ p.add_argument('--set', action='append', default=[])
 p.add_argument('--patch', default='')
 p.add_argument('--aspect-fit', action='store_true')
 p.add_argument('--fps-hud', action='store_true')
+p.add_argument('--ui-aspect', type=float, default=0)
 p.add_argument('--language', type=int, default=-1)
 p.add_argument('--affinity', default='')
 p.add_argument('--prompt', action='store_true')
@@ -189,6 +191,10 @@ if a.threads > 0:
 env.setdefault('KYTY_HITCH_LOG_MS', '100')
 if a.aspect_fit:
 	env['KYTY_PRESENT_ASPECT'] = 'fit'
+# --ui-aspect 2.3889: a screen wider than 16:9 (ultrawide, Demon's Souls 01.007.000): the camera's aspect ratio follows
+# the screen and the interface keeps its proportions (KYTY_UI_ASPECT); movies and logos stay 16:9 with black bars.
+if a.ui_aspect > 16 / 9 + 0.01:
+	env['KYTY_UI_ASPECT'] = f'{a.ui_aspect:.6g}'
 # --fps-hud: the emulator's own frame counter in the corner (the game's frames a second, KYTY_FPS_HUD).
 if a.fps_hud:
 	env['KYTY_FPS_HUD'] = '1'
