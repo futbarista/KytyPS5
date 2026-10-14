@@ -77,6 +77,10 @@ struct GraphicContext {
 	// copies (src/local/readback-queue.h); buffers are then shared with its family.
 	uint32_t                           readback_family = static_cast<uint32_t>(-1);
 	vk::Queue                          readback_queue  = nullptr;
+	// KYTY_FRAMEGEN=fsr (Linux): the queues FSR 3.1 frame generation's swapchain uses besides the game's, all of one
+	// compute family: async compute, present and image acquire (src/local/frame-gen.cpp).
+	uint32_t                           framegen_family = static_cast<uint32_t>(-1);
+	vk::Queue                          framegen_queues[3] {};
 	// Windows: a second queue of the graphics family used only for vkQueuePresentKHR. The
 	// driver can block a present in the kernel until earlier GPU work on its queue is done;
 	// on the graphics queue that held queue_mutex against the very submissions that work

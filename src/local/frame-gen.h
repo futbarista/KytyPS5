@@ -48,6 +48,10 @@ struct FrameInputs {
 	Camera        camera;
 	uint64_t      guest_frame = 0;
 	bool          motion_attachment = false; // the motion copy is a color attachment too
+	// KYTY_FRAMEGEN=fsr: the game's interface layer of the frame (the composite pass's texture 0), for the HUD-less image.
+	VulkanImage   ui;
+	vk::ImageView ui_view  = nullptr;
+	bool          ui_valid = false;
 	bool          valid       = false;
 };
 
@@ -86,6 +90,31 @@ void OnDispatch(uint64_t cs_hash, ImageId depth, uint64_t depth_address, ImageId
 void PrepareInputs(GraphicContext& graphics, TextureCache& cache, CommandBuffer& command,
                    FrameInputs& inputs);
 void DestroyInputs(GraphicContext& graphics, FrameInputs& inputs);
+
+// FSR 3.1 frame generation (KYTY_FRAMEGEN=fsr, Linux builds with KYTY_FRAMEGEN_FSR): one generated frame per rendered
+// frame through AMD FidelityFX's frame interpolation swapchain, from the same inputs as DLSS-G.
+// Before the device: FSR is asked for (the device then gets its queues, GraphicContext::framegen_queues).
+[[nodiscard]] bool FsrRequested();
+// Swapchain::Create/Destroy: with FSR the swapchain is FidelityFX's (its acquire, present and image calls then replace
+// the dispatcher's); false: FSR is not in use, the caller makes an ordinary swapchain.
+[[nodiscard]] bool CreateSwapchain(GraphicContext& graphics, const vk::SwapchainCreateInfoKHR& info,
+                                   vk::SwapchainKHR* swapchain);
+[[nodiscard]] bool DestroySwapchain(GraphicContext& graphics, vk::SwapchainKHR swapchain);
+// Present thread, into the present commands before they are submitted: the frame's generation settings and FSR's
+// preparation of `inputs` (null: a frame without inputs, generation then pauses).
+void RecordPrepare(vk::CommandBuffer command, const FrameInputs* inputs, vk::Extent2D backbuffer, vk::Rect2D region,
+                   vk::Format format);
+// FidelityFX's swapchain is in use: vkQueuePresentKHR is called without the game queue's lock (FSR's own submissions to
+// that queue take it).
+[[nodiscard]] bool FsrActive();
+// Renderer thread: Demon's Souls' interface composite pass reads the interface layer `ui` (texture 0).
+void OnComposite(ImageId ui, uint64_t ui_address);
+// Present thread, after the present commands: the HUD-less image FSR interpolates, from the backbuffer (in the present
+// layout) and the frame's interface layer.
+void RecordHudless(vk::CommandBuffer command, vk::Image backbuffer, const FrameInputs* inputs, vk::Extent2D extent,
+                   vk::Rect2D region);
+// The time a vkQueuePresentKHR took (FSR's run-log statistics).
+void NotePresent(uint64_t microseconds);
 
 } // namespace FrameGen
 } // namespace Libs::Graphics

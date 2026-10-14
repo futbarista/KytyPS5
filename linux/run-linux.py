@@ -12,7 +12,7 @@
 #   ./run.sh --set KEY=VALUE          override a switch of the config (KEY= removes it)
 #   ./run.sh --fps120                 the game's frame rate up to 120 fps instead of 60 (movies play faster)
 #   ./run.sh --vblank 240             another virtual vblank rate (default 60, the console's)
-#   ./run.sh --render-height 1080     Demon's Souls renders its 3D at 1920x1080 instead of 2560x1440 (720-1440)
+#   ./run.sh --render-height 1080     Demon's Souls renders its 3D at 1920x1080 instead of 2560x1440 (720-2160; 2160: native 4K)
 #   ./run.sh --game <folder>          the game (the folder with eboot.bin); remembered in game-path.txt, a folder
 #                                     dialog when none is known
 #   ./run.sh --game <file.zar>        the game folder packed into a ZArchive (read without extracting it)
@@ -21,6 +21,7 @@
 #                                     precompiled for this GPU (run.sh passes it)
 #   ./run.sh --follow                 stay open showing the run log until the game exits, then its exit code
 #   ./run.sh --width 3440 --height 1440 --ui-aspect 2.3889   ultrawide (21:9): wider camera, interface in proportion
+#   ./run.sh --framegen               FSR 3.1 frame generation (x2 frames on screen)
 #   ./run.sh --fps-hud                the game's frames a second in the corner of the window
 #   ./run.sh --dry-run                print environment and command only
 # --no-redzone is accepted and does nothing: the red-zone protection is for Windows, whose exception dispatch
@@ -59,6 +60,7 @@ p.add_argument('--set', action='append', default=[])
 p.add_argument('--patch', default='')
 p.add_argument('--aspect-fit', action='store_true')
 p.add_argument('--fps-hud', action='store_true')
+p.add_argument('--framegen', action='store_true')
 p.add_argument('--ui-aspect', type=float, default=0)
 p.add_argument('--language', type=int, default=-1)
 p.add_argument('--affinity', default='')
@@ -195,6 +197,10 @@ if a.aspect_fit:
 # the screen and the interface keeps its proportions (KYTY_UI_ASPECT); movies and logos stay 16:9 with black bars.
 if a.ui_aspect > 16 / 9 + 0.01:
 	env['KYTY_UI_ASPECT'] = f'{a.ui_aspect:.6g}'
+# --framegen: AMD FSR 3.1 frame generation, one generated frame per rendered frame (KYTY_FRAMEGEN=fsr): twice the frames
+# on screen; menus, movies and loading screens are shown as they are.
+if a.framegen:
+	env['KYTY_FRAMEGEN'] = 'fsr'
 # --fps-hud: the emulator's own frame counter in the corner (the game's frames a second, KYTY_FPS_HUD).
 if a.fps_hud:
 	env['KYTY_FPS_HUD'] = '1'

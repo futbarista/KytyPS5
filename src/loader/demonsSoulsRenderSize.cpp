@@ -74,7 +74,7 @@ void Install(Program* program) {
 	if (requested == RenderHeight) return;
 	const auto size = RenderSizeFor(requested);
 	if (size.height == 0) {
-		std::printf("Demon's Souls render size: KYTY_RENDER_HEIGHT=%s is not 720-1440; the game's 2560x1440 kept\n", setting);
+		std::printf("Demon's Souls render size: KYTY_RENDER_HEIGHT=%s is not 720-2160; the game's 2560x1440 kept\n", setting);
 		return;
 	}
 	const auto constant = FindRenderConstant(*program);

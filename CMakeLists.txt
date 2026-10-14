@@ -335,6 +335,22 @@ add_custom_command(
 )
 list(APPEND kyty_emulator_src "${lod_stats_pack_header}")
 
+# KYTY_FRAMEGEN=fsr: the HUD-less image for FSR frame generation (src/local/frame-gen.cpp).
+set(fsr_hudless_source "${KYTY_SOURCE_DIR}/local/fsr-hudless.comp")
+set(fsr_hudless_spv "${gpu_tiler_generated_dir}/fsr_hudless.spv")
+set(fsr_hudless_header "${gpu_tiler_generated_dir}/fsr_hudless_spv.h")
+add_custom_command(
+	OUTPUT "${fsr_hudless_header}"
+	COMMAND ${CMAKE_COMMAND} -E make_directory "${gpu_tiler_generated_dir}"
+	COMMAND "${KYTY_GLSLANG_VALIDATOR}" -V --target-env vulkan1.3 -Os
+	        -o "${fsr_hudless_spv}" "${fsr_hudless_source}"
+	COMMAND ${CMAKE_COMMAND} -DINPUT=${fsr_hudless_spv} -DOUTPUT=${fsr_hudless_header}
+	        -DSYMBOL=FSR_HUDLESS_SPV -P "${KYTY_SOURCE_DIR}/embed_spirv.cmake"
+	DEPENDS "${fsr_hudless_source}" "${KYTY_SOURCE_DIR}/embed_spirv.cmake"
+	VERBATIM
+)
+list(APPEND kyty_emulator_src "${fsr_hudless_header}")
+
 set(gpu_blit_generated_dir "${PROJECT_BINARY_DIR}/gpu_blit_shaders")
 set(gpu_blit_shader_sources
 	"${gpu_tiler_shader_dir}/gpu_blit_fs_triangle.vert"
@@ -374,6 +390,18 @@ if (KYTY_CLANG_CL)
 endif()
 
 set(kyty_emulator_link_libraries common Vulkan::Headers spirv-tools-opt spirv-tools SDL2-static imgui xxhash FFmpeg::ffmpeg fmt::fmt nlohmann_json::nlohmann_json LibAtrac9 kyty_git_version Zydis::Zydis xbyak::xbyak libzstd_static)
+
+# FSR 3.1 frame generation (AMD FidelityFX SDK, 3rdparty/FidelityFX-FG): KYTY_FRAMEGEN=fsr, the Linux counterpart of
+# the Windows build's DLSS-G (src/local/frame-gen.cpp).
+if(LINUX)
+	option(KYTY_FRAMEGEN_FSR "FSR 3.1 frame generation (KYTY_FRAMEGEN=fsr)" ON)
+	if(KYTY_FRAMEGEN_FSR)
+		find_package(Threads REQUIRED)
+		add_subdirectory("${KYTY_THIRD_PARTY_DIR}/FidelityFX-FG" "${CMAKE_CURRENT_BINARY_DIR}/3rdparty/FidelityFX-FG")
+		list(APPEND kyty_emulator_link_libraries ffx_framegen)
+		add_compile_definitions(KYTY_FRAMEGEN_FSR=1)
+	endif()
+endif()
 
 # Linux system libraries required by the static FFmpeg archive.
 if(LINUX)

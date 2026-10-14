@@ -21,10 +21,10 @@ LANGUAGES = ['Japanese', 'English (United States)', 'French (France)', 'Spanish 
 RESOLUTIONS = ['1280x720', '1920x1080', '2560x1440', '3840x2160', '2560x1080 (21:9)', '3440x1440 (21:9)', '3840x1600 (21:9)',
                '5120x1440 (32:9)']
 # The height Demon's Souls renders its 3D at (run.sh --render-height); its output and UI stay 3840x2160.
-RENDER_HEIGHTS = ['1440 (PS5)', '1296', '1152', '1080', '900']
+RENDER_HEIGHTS = ['2160 (4K, PS5 Pro-like)', '1800', '1620', '1440 (PS5)', '1296', '1152', '1080', '900']
 
 settings = {'game': '', 'resolution': '2560x1440', 'fullscreen': False, 'aspect': True, 'language': 1,
-            'redzone': True, 'ecores': False, 'fps120': False, 'render': 1440, 'fpshud': True}
+            'redzone': True, 'ecores': False, 'fps120': False, 'render': 1440, 'fpshud': True, 'framegen': False}
 if os.path.isfile(SETTINGS):
 	try:
 		saved = json.loads(kc.read_text(SETTINGS))
@@ -54,6 +54,8 @@ def play_command():
 		args.append('--fps120')
 	if settings['fpshud']:
 		args.append('--fps-hud')
+	if settings['framegen']:
+		args.append('--framegen')
 	if int(settings['render']) > 0 and int(settings['render']) != 1440:
 		args += ['--render-height', str(int(settings['render']))]
 	if settings['game']:
@@ -191,6 +193,9 @@ add_row('', redzone_row)
 fps120 = tk.BooleanVar(value=bool(settings['fps120']))
 add_row('', lambda row: ttk.Checkbutton(row, text="Up to 120 fps (the game's own frames; movies play faster)",
                                         variable=fps120).pack(side='left'))
+framegen = tk.BooleanVar(value=bool(settings['framegen']))
+add_row('', lambda row: ttk.Checkbutton(row, text='FSR 3 Frame Generation (x2 frames on screen, AMD FidelityFX)',
+                                        variable=framegen).pack(side='left'))
 fpshud = tk.BooleanVar(value=bool(settings['fpshud']))
 add_row('', lambda row: ttk.Checkbutton(row, text='Show FPS (the game\'s frames a second, top corner)',
                                         variable=fpshud).pack(side='left'))
@@ -227,6 +232,7 @@ def read_form():
 	settings['redzone'] = redzone.get()
 	settings['fps120'] = fps120.get()
 	settings['fpshud'] = fpshud.get()
+	settings['framegen'] = framegen.get()
 	settings['render'] = int(render.get().split(' ')[0])
 	settings['ecores'] = ecores.get()
 	save_settings()

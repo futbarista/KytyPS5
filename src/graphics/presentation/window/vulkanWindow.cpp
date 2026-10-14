@@ -619,7 +619,7 @@ static vk::Device VulkanCreateDevice(vk::PhysicalDevice physical_device, const V
 	EXIT_IF(physical_device == nullptr);
 	EXIT_IF(queue_family == static_cast<uint32_t>(-1));
 
-	const float               queue_priorities[2] = {1.0f, 1.0f};
+	const float               queue_priorities[3] = {1.0f, 1.0f, 1.0f};
 	vk::DeviceQueueCreateInfo queue_create_info {};
 	queue_create_info.sType            = vk::StructureType::eDeviceQueueCreateInfo;
 	queue_create_info.queueFamilyIndex = queue_family;
@@ -627,7 +627,7 @@ static vk::Device VulkanCreateDevice(vk::PhysicalDevice physical_device, const V
 	queue_create_info.pQueuePriorities = queue_priorities;
 
 	// KYTY_READBACK_QUEUE: also a queue of a transfer-only family (the copy engine).
-	std::array<vk::DeviceQueueCreateInfo, 2> queue_create_infos {queue_create_info, queue_create_info};
+	std::array<vk::DeviceQueueCreateInfo, 3> queue_create_infos {queue_create_info, queue_create_info, queue_create_info};
 	uint32_t                                 queue_create_count = 1;
 	graphics.readback_family                                    = static_cast<uint32_t>(-1);
 #if defined(_WIN32)
@@ -658,6 +658,27 @@ static vk::Device VulkanCreateDevice(vk::PhysicalDevice physical_device, const V
 				queue_create_infos[1].queueFamilyIndex           = family;
 				queue_create_count                               = 2;
 				LOGF("\treadback queue family %u\n", family);
+				break;
+			}
+		}
+	}
+
+	// KYTY_FRAMEGEN=fsr: three queues of a compute family other than the game's (FSR's async compute, present and image
+	// acquire queues; frame-gen.cpp checks that the family can present).
+	graphics.framegen_family = static_cast<uint32_t>(-1);
+	if (Libs::Graphics::FrameGen::FsrRequested()) {
+		uint32_t family_count = 0;
+		physical_device.getQueueFamilyProperties(&family_count, nullptr);
+		std::vector<vk::QueueFamilyProperties> families(family_count);
+		physical_device.getQueueFamilyProperties(&family_count, families.data());
+		for (uint32_t family = 0; family < family_count; ++family) {
+			if (family != queue_family && family != graphics.readback_family && families[family].queueCount >= 3 &&
+			    (families[family].queueFlags & vk::QueueFlagBits::eCompute)) {
+				graphics.framegen_family                                = family;
+				queue_create_infos[queue_create_count].queueFamilyIndex = family;
+				queue_create_infos[queue_create_count].queueCount       = 3;
+				queue_create_count++;
+				LOGF("\tframe generation queues: family %u\n", family);
 				break;
 			}
 		}
@@ -1447,6 +1468,11 @@ void WindowContext::CreateVulkan() {
 		graphic_ctx.device.getQueue(graphic_ctx.readback_family, 0, &graphic_ctx.readback_queue);
 		EXIT_IF(graphic_ctx.readback_queue == nullptr);
 		DeviceFault::NoteQueue(graphic_ctx.readback_queue, "readback");
+	}
+	if (graphic_ctx.framegen_family != static_cast<uint32_t>(-1)) {
+		for (uint32_t i = 0; i < 3; ++i) {
+			graphic_ctx.device.getQueue(graphic_ctx.framegen_family, i, &graphic_ctx.framegen_queues[i]);
+		}
 	}
 	Libs::Graphics::FrameGen::OnDevice(graphic_ctx.instance, graphic_ctx.physical_device, graphic_ctx.device);
 

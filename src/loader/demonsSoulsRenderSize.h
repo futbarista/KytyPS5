@@ -5,7 +5,7 @@
 
 namespace Loader {
 struct Program;
-// KYTY_RENDER_HEIGHT=<720..1440> (run-windows.ps1 -RenderHeight, the launcher's "Render resolution"): Demon's Souls'
+// KYTY_RENDER_HEIGHT=<720..2160> (run-windows.ps1 -RenderHeight, the launcher's "Render resolution"): Demon's Souls'
 // performance mode - the PS5's default, its 3D rendered at 2560x1440 and upscaled by the game to a 3840x2160 output -
 // renders its 3D at that height (16:9) instead. The output, the UI and what the game draws at output size stay 4K;
 // GPU-bound PCs (a laptop's RTX 3080: 1-1 standing 20.7 -> 24.5 fps at 1080) trade sharpness for frame rate.
@@ -29,7 +29,9 @@ struct Size {
 	uint32_t height = 0;
 };
 inline Size RenderSizeFor(uint32_t height) {
-	if (height < 720 || height > RenderHeight) return {};
+	// Up to the output's 2160: native 4K in the performance mode's 60 fps (the quality mode's render size, which the
+	// engine allocates for), the PS5 Pro-like setting.
+	if (height < 720 || height > OutputHeight) return {};
 	const uint32_t width = (height * 16u / 9u + 4u) / 8u * 8u;
 	return {width, height};
 }

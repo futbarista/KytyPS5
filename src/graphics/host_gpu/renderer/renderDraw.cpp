@@ -1595,6 +1595,13 @@ bool RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		FrameGen::OnDraw(state.vs_input_info.stage.program->shader_hash,
 		                 state.vs_input_info.stage.resources.flattened_srt);
 	}
+	// KYTY_FRAMEGEN=fsr: the interface layer the composite pass blends over the scene (its texture 0; texture 1 is the
+	// scene), for FSR's HUD-less image.
+	if (FrameGen::FsrActive() && state.ps_active && state.ps_input_info.stage.program != nullptr &&
+	    state.ps_input_info.stage.program->shader_hash == UiAspect::CompositePs && bindings.pixel.has_value() &&
+	    !bindings.pixel->images.empty()) {
+		FrameGen::OnComposite(bindings.pixel->images[0].image_id, bindings.pixel->images[0].desc.info.data.address);
+	}
 	if (XprCapture::g_state.pending) {
 		CaptureXprTargets(state, bindings);
 	}

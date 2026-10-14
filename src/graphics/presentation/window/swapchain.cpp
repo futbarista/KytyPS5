@@ -309,6 +309,7 @@ public:
 	}
 	[[nodiscard]] vk::Format Format() const noexcept { return m_format; }
 	[[nodiscard]] vk::Extent2D Extent() const noexcept { return m_extent; }
+	[[nodiscard]] vk::Image CurrentImage() const noexcept { return m_images[m_image_index]; }
 	// Where RecordPresentCommands put the frame in the swapchain image.
 	[[nodiscard]] vk::Rect2D PresentRegion() const noexcept { return m_present_region; }
 
@@ -426,8 +427,8 @@ struct Presenter::Impl {
 			std::array<char, 128> detail {};
 			std::snprintf(title.data(), title.size(), "%.0f FPS", game * shown);
 			if (shown > 1) {
-				std::snprintf(detail.data(), detail.size(), "DLSS Frame Generation %ux  |  game %.0f fps",
-				              shown, game);
+				std::snprintf(detail.data(), detail.size(), "%s Frame Generation %ux  |  game %.0f fps",
+				              FrameGen::FsrActive() ? "FSR" : "DLSS", shown, game);
 			} else {
 				std::snprintf(detail.data(), detail.size(), "game %.0f fps", game);
 			}
@@ -539,6 +540,8 @@ void Swapchain::Create() {
 	create_info.imageArrayLayers = 1;
 	create_info.imageUsage =
 	    vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eTransferDst;
+	// KYTY_FRAMEGEN=fsr: the backbuffer is copied into FSR's HUD-less image.
+	if (FrameGen::FsrRequested()) create_info.imageUsage |= vk::ImageUsageFlagBits::eTransferSrc;
 	create_info.imageSharingMode = vk::SharingMode::eExclusive;
 	create_info.preTransform     = transform;
 	create_info.compositeAlpha   = composite;
@@ -558,8 +561,11 @@ void Swapchain::Create() {
 		create_info.presentMode = vk::PresentModeKHR::eFifo;
 	}
 	create_info.clipped          = VK_TRUE;
-	RequireVulkanSuccess(graphics.device.createSwapchainKHR(&create_info, nullptr, &m_handle),
-	                     "vkCreateSwapchainKHR");
+	// KYTY_FRAMEGEN=fsr: FidelityFX's frame interpolation swapchain instead.
+	if (!FrameGen::CreateSwapchain(graphics, create_info, &m_handle)) {
+		RequireVulkanSuccess(graphics.device.createSwapchainKHR(&create_info, nullptr, &m_handle),
+		                     "vkCreateSwapchainKHR");
+	}
 	EXIT_IF(m_handle == nullptr);
 
 	m_images = EnumerateVulkan<vk::Image>(
@@ -641,7 +647,7 @@ void Swapchain::Destroy() {
 		}
 	}
 	if (m_handle != nullptr) {
-		graphics.device.destroySwapchainKHR(m_handle, nullptr);
+		if (!FrameGen::DestroySwapchain(graphics, m_handle)) graphics.device.destroySwapchainKHR(m_handle, nullptr);
 	}
 
 	m_handle      = nullptr;
@@ -844,8 +850,16 @@ Swapchain::Status Swapchain::Present() {
 		Common::LockGuard lock(graphics.present_queue_mutex);
 		result = graphics.present_queue.presentKHR(&present);
 	} else {
-		Common::LockGuard lock(graphics.queue_mutex);
+		// KYTY_FRAMEGEN=fsr: FidelityFX's present waits for its own presenter thread, which submits to this queue under
+		// its lock (FrameGen's submit function): it is called without the lock.
+		std::optional<Common::LockGuard> lock;
+		if (!FrameGen::FsrActive()) lock.emplace(graphics.queue_mutex);
+		const auto start = std::chrono::steady_clock::now();
 		result = graphics.queue.presentKHR(&present);
+		if (FrameGen::FsrActive()) {
+			FrameGen::NotePresent(static_cast<uint64_t>(
+			    std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count()));
+		}
 	}
 	switch (result) {
 		case vk::Result::eSuccess: break;
@@ -1010,7 +1024,17 @@ void Presenter::Present(Frame& frame, bool reuse) {
 				    (static_cast<float>(hud->drawn.offset.x - region.offset.x) + static_cast<float>(hud->drawn.extent.width) + margin) / w,
 				    (static_cast<float>(hud->drawn.offset.y - region.offset.y) + static_cast<float>(hud->drawn.extent.height) + margin) / h);
 			}
+			// KYTY_FRAMEGEN=fsr: this frame's generation settings and FSR's preparation of its depth and motion.
+			const FrameGen::FrameInputs* fsr_inputs = frame.reusing_last ? nullptr : &frame.fg;
+			if (FrameGen::FsrRequested()) {
+				FrameGen::RecordPrepare(command.Handle(), fsr_inputs, swapchain.Extent(), swapchain.PresentRegion(),
+				                        swapchain.Format());
+			}
 			swapchain.RecordPresentCommands(command, frame.image, draw_system_overlay);
+			if (FrameGen::FsrActive()) {
+				FrameGen::RecordHudless(command.Handle(), swapchain.CurrentImage(), fsr_inputs, swapchain.Extent(),
+				                        swapchain.PresentRegion());
+			}
 			frame.present_tick = swapchain.Submit(m_impl->present_scheduler);
 		}
 #if defined(_WIN32)
