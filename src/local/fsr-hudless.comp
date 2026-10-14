@@ -1,0 +1,31 @@
+#version 450
+// KYTY_FRAMEGEN=fsr: the HUD-less image FSR 3.1 frame generation interpolates (frame-gen.cpp). Demon's Souls blends its
+// interface layer over the scene in one pass, so no image without the interface exists: this one is the presented
+// backbuffer itself (a copy, in `image`), darkened by the interface layer's alpha where the interface covers it. FSR
+// interpolates it and, where it differs from the backbuffer (the interface), shows the real frame's pixels: the
+// interface is not interpolated (it tore when the camera moved).
+#extension GL_EXT_shader_image_load_formatted : require
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform sampler2D interface_layer;
+layout(set = 0, binding = 1) uniform image2D image;
+
+layout(push_constant) uniform Constants {
+	ivec2 offset; // the game image in the backbuffer
+	ivec2 size;
+	ivec2 extent; // the backbuffer
+	float threshold;
+} pc;
+
+void main() {
+	const ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+	if (any(greaterThanEqual(p, pc.extent))) return;
+	const ivec2 q = p - pc.offset;
+	if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, pc.size))) return;
+	const float alpha = textureLod(interface_layer, (vec2(q) + 0.5) / vec2(pc.size), 0.0).a;
+	if (alpha <= pc.threshold) return;
+	vec4 color = imageLoad(image, p);
+	color.rgb *= 1.0 - alpha;
+	imageStore(image, p, color);
+}

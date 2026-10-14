@@ -889,9 +889,10 @@ static void WindowCreate(WindowContext& context) {
 		window_flags |= static_cast<uint32_t>(SDL_WINDOW_BORDERLESS);
 	}
 #endif
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(KYTY_FRAMEGEN_FSR)
 	// KYTY_FRAMEGEN: Streamline must be initialized before SDL loads Vulkan with the window, and
-	// then becomes that loader (the instance and device are created through it).
+	// then becomes that loader (the instance and device are created through it). FSR (Linux): before the device, which
+	// then gets FSR's queues.
 	Libs::Graphics::FrameGen::Initialize();
 #endif
 	context.window = SDL_CreateWindow(KYTY_SDL_WINDOW_CAPTION, KYTY_SDL_WINDOWPOS_CENTERED,

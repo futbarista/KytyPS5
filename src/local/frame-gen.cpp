@@ -9,6 +9,19 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <string_view>
+
+#ifdef KYTY_FRAMEGEN_FSR
+// AMD FidelityFX SDK v1.1.4 (3rdparty/FidelityFX-FG): FSR 3.1 frame generation and its frame interpolation swapchain.
+#include <ffx_api/ffx_api.h>
+#include <ffx_api/ffx_framegeneration.h>
+#include <ffx_api/vk/ffx_api_vk.h>
+
+#include "gpu_tiler_shaders/fsr_hudless_spv.h"
+
+#include <chrono>
+#include <cstdio>
+#endif
 
 #ifdef KYTY_FRAMEGEN_STREAMLINE
 #ifndef NOMINMAX
@@ -46,7 +59,18 @@ int      g_generate    = 0;     // frames to generate per rendered frame (0 = of
 bool     g_ready       = false; // Streamline loaded and the feature available
 Camera   g_camera;              // Kyty.Gpu: the current guest frame
 Sources  g_sources;             // Kyty.Gpu: the current guest frame
+struct UiSource {
+	ImageId  id;
+	uint64_t address = 0;
+	bool     valid   = false;
+};
+UiSource g_ui;                  // Kyty.Gpu: the current guest frame's interface layer (FSR)
 uint64_t g_guest_frame = 0;     // Kyty.Gpu
+// Per 5 s run-log line (FSR): guest frames without inputs by reason (no TAA pass, no camera, both, images replaced),
+// and the time vkQueuePresentKHR took.
+std::atomic<uint32_t> g_missing[4] {};
+std::atomic<uint64_t> g_present_us {0};
+std::atomic<uint32_t> g_present_count {0};
 
 float AsFloat(uint32_t word) {
 	float value = 0.0f;
@@ -109,7 +133,8 @@ void Configure(GraphicContext& graphics, VulkanImage& image, vk::ImageView& view
 	create.format        = source.format;
 	create.tiling        = vk::ImageTiling::eOptimal;
 	create.initialLayout = vk::ImageLayout::eUndefined;
-	create.usage         = vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled;
+	create.usage         = vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eTransferSrc |
+	                       vk::ImageUsageFlagBits::eSampled;
 	if (attachment != nullptr) {
 		*attachment = !IsDepthFormat(source.format) &&
 		              static_cast<bool>(graphics.physical_device.getFormatProperties(source.format).optimalTilingFeatures &
@@ -348,7 +373,576 @@ bool FeatureFunction(sl::Feature feature, const char* name, F*& function) {
 }
 #endif
 
+#ifdef KYTY_FRAMEGEN_FSR
+// FSR 3.1 frame generation: the swapchain context (FidelityFX's swapchain, made at the first Swapchain::Create) and the
+// frame generation context (made at the first frame, again when the backbuffer changes).
+struct Fsr {
+	bool                                       requested = false;
+	GraphicContext*                            graphics  = nullptr;
+	ffxContext                                 swapchain_context = nullptr;
+	ffxQueryDescSwapchainReplacementFunctionsVK functions {};
+	VkSwapchainKHR                             swapchain = VK_NULL_HANDLE;
+	ffxContext                                 context   = nullptr;
+	vk::Extent2D                               context_backbuffer {};
+	vk::Format                                 context_format = vk::Format::eUndefined;
+	uint64_t                                   frame_id = 0;
+	bool                                       generating = false;
+	// The last frame with inputs, FSR's own copy: frames without inputs of their own (a few in play) are prepared
+	// from it, so that generation stays on. Turning it off and on makes FidelityFX's swapchain wait for the whole
+	// device twice (waitForPresents: every queue and the device idle), which halved the game's frame rate.
+	FrameInputs                                last;
+	uint32_t                                   missing_run = 0;
+	// The HUD-less image (the backbuffer's size and format) and the pass that makes it (fsr-hudless.comp).
+	VulkanImage                                hudless;
+	vk::ImageView                              hudless_view = nullptr;
+	bool                                       hudless_frame = false; // this frame has one
+	bool                                       hudless_failed = false;
+	vk::DescriptorSetLayout                    hudless_set_layout = nullptr;
+	vk::PipelineLayout                         hudless_layout = nullptr;
+	vk::Pipeline                               hudless_pipeline = nullptr;
+	vk::Sampler                                hudless_sampler = nullptr;
+	std::chrono::steady_clock::time_point      last_frame {};
+};
+Fsr                g_fsr;
+
+// FSR's submissions to the game queue, from the present thread and its own: under the queue's lock.
+VkResult FsrSubmitGame(uint32_t count, const VkSubmitInfo* submits, VkFence fence) {
+	auto&      graphics = *g_fsr.graphics;
+	const auto submit   = VULKAN_HPP_DEFAULT_DISPATCHER.vkQueueSubmit;
+	Common::LockGuard lock(graphics.queue_mutex);
+	return submit(static_cast<VkQueue>(graphics.queue), count, submits, fence);
+}
+
+// The dispatcher's create/destroy go through FidelityFX's, which take the swapchain context too.
+VkResult VKAPI_CALL FsrCreateSwapchain(VkDevice device, const VkSwapchainCreateInfoKHR* info, const VkAllocationCallbacks* allocator,
+                                       VkSwapchainKHR* swapchain) {
+	return g_fsr.functions.pOutCreateSwapchainFFXAPI(device, info, allocator, swapchain, g_fsr.swapchain_context);
+}
+void VKAPI_CALL FsrDestroySwapchain(VkDevice device, VkSwapchainKHR swapchain, const VkAllocationCallbacks* allocator) {
+	g_fsr.functions.pOutDestroySwapchainFFXAPI(device, swapchain, allocator, g_fsr.swapchain_context);
+}
+
+ffxReturnCode_t FsrGenerate(ffxDispatchDescFrameGeneration* params, void* context) {
+	return ffxDispatch(reinterpret_cast<ffxContext*>(context), &params->header);
+}
+
+FfxApiResource FsrResource(const VulkanImage& image) {
+	VkImageCreateInfo info {};
+	info.sType       = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+	info.imageType   = VK_IMAGE_TYPE_2D;
+	info.format      = static_cast<VkFormat>(image.format);
+	info.extent      = {image.extent.width, image.extent.height, 1};
+	info.mipLevels   = 1;
+	info.arrayLayers = 1;
+	info.samples     = VK_SAMPLE_COUNT_1_BIT;
+	info.usage       = static_cast<VkImageUsageFlags>(image.usage);
+	return ffxApiGetResourceVK(static_cast<void*>(static_cast<VkImage>(image.image)),
+	                           ffxApiGetImageResourceDescriptionVK(static_cast<VkImage>(image.image), info, 0),
+	                           FFX_API_RESOURCE_STATE_PIXEL_COMPUTE_READ);
+}
+
+void CopyImage(vk::CommandBuffer command, VulkanImage& source, VulkanImage& target) {
+	const auto aspect = IsDepthFormat(source.format) ? vk::ImageAspectFlagBits::eDepth : vk::ImageAspectFlagBits::eColor;
+	Transition(command, source, aspect, vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead,
+	           vk::PipelineStageFlagBits2::eTransfer);
+	Transition(command, target, aspect, vk::ImageLayout::eTransferDstOptimal, vk::AccessFlagBits2::eTransferWrite,
+	           vk::PipelineStageFlagBits2::eTransfer);
+	vk::ImageCopy copy {};
+	copy.srcSubresource = {aspect, 0, 0, 1};
+	copy.dstSubresource = {aspect, 0, 0, 1};
+	copy.extent         = vk::Extent3D {target.extent.width, target.extent.height, 1};
+	command.copyImage(source.image, vk::ImageLayout::eTransferSrcOptimal, target.image, vk::ImageLayout::eTransferDstOptimal,
+	                  copy);
+	for (auto* image: {&source, &target}) {
+		Transition(command, *image, aspect, vk::ImageLayout::eShaderReadOnlyOptimal, vk::AccessFlagBits2::eShaderRead,
+		           vk::PipelineStageFlagBits2::eAllCommands);
+	}
+}
+
+// Clears a FSR input copy: zero depth (the far plane, reversed-Z) or zero motion.
+void ClearImage(vk::CommandBuffer command, VulkanImage& image) {
+	const bool depth  = IsDepthFormat(image.format);
+	const auto aspect = depth ? vk::ImageAspectFlagBits::eDepth : vk::ImageAspectFlagBits::eColor;
+	Transition(command, image, aspect, vk::ImageLayout::eTransferDstOptimal, vk::AccessFlagBits2::eTransferWrite,
+	           vk::PipelineStageFlagBits2::eTransfer);
+	const vk::ImageSubresourceRange range {aspect, 0, 1, 0, 1};
+	if (depth) {
+		const vk::ClearDepthStencilValue value {0.0f, 0};
+		command.clearDepthStencilImage(image.image, vk::ImageLayout::eTransferDstOptimal, &value, 1, &range);
+	} else {
+		const vk::ClearColorValue value {std::array<float, 4> {0.0f, 0.0f, 0.0f, 0.0f}};
+		command.clearColorImage(image.image, vk::ImageLayout::eTransferDstOptimal, &value, 1, &range);
+	}
+	Transition(command, image, aspect, vk::ImageLayout::eShaderReadOnlyOptimal, vk::AccessFlagBits2::eShaderRead,
+	           vk::PipelineStageFlagBits2::eAllCommands);
+}
+
+// The HUD-less pass's pipeline (once) and image (again when the backbuffer changes); false: no HUD-less image.
+bool FsrHudlessReady(vk::Extent2D extent, vk::Format format) {
+	if (g_fsr.hudless_failed) return false;
+	auto& graphics = *g_fsr.graphics;
+	auto& device   = graphics.device;
+	if (g_fsr.hudless_pipeline == nullptr) {
+		const bool storage = static_cast<bool>(graphics.physical_device.getFormatProperties(format).optimalTilingFeatures &
+		                                       vk::FormatFeatureFlagBits::eStorageImage);
+		if (graphics.max_push_descriptors == 0 || !storage) {
+			std::printf("Frame generation: no HUD-less image (push descriptors %u, storage %d); the interface is interpolated\n",
+			            graphics.max_push_descriptors, static_cast<int>(storage));
+			g_fsr.hudless_failed = true;
+			return false;
+		}
+		vk::DescriptorSetLayoutBinding bindings[2] {};
+		bindings[0].binding         = 0;
+		bindings[0].descriptorType  = vk::DescriptorType::eCombinedImageSampler;
+		bindings[0].descriptorCount = 1;
+		bindings[0].stageFlags      = vk::ShaderStageFlagBits::eCompute;
+		bindings[1].binding         = 1;
+		bindings[1].descriptorType  = vk::DescriptorType::eStorageImage;
+		bindings[1].descriptorCount = 1;
+		bindings[1].stageFlags      = vk::ShaderStageFlagBits::eCompute;
+		vk::DescriptorSetLayoutCreateInfo set_info {};
+		set_info.flags        = vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptorKHR;
+		set_info.bindingCount = 2;
+		set_info.pBindings    = bindings;
+		RequireVulkanSuccess(device.createDescriptorSetLayout(&set_info, nullptr, &g_fsr.hudless_set_layout), "FSR HUD-less set layout");
+		vk::PushConstantRange range {vk::ShaderStageFlagBits::eCompute, 0, 32};
+		vk::PipelineLayoutCreateInfo layout_info {};
+		layout_info.setLayoutCount         = 1;
+		layout_info.pSetLayouts            = &g_fsr.hudless_set_layout;
+		layout_info.pushConstantRangeCount = 1;
+		layout_info.pPushConstantRanges    = &range;
+		RequireVulkanSuccess(device.createPipelineLayout(&layout_info, nullptr, &g_fsr.hudless_layout), "FSR HUD-less layout");
+		vk::ShaderModuleCreateInfo module_info {};
+		module_info.codeSize = sizeof(FSR_HUDLESS_SPV);
+		module_info.pCode    = FSR_HUDLESS_SPV;
+		vk::ShaderModule module = nullptr;
+		RequireVulkanSuccess(device.createShaderModule(&module_info, nullptr, &module), "FSR HUD-less shader");
+		vk::ComputePipelineCreateInfo pipeline_info {};
+		pipeline_info.stage.stage  = vk::ShaderStageFlagBits::eCompute;
+		pipeline_info.stage.module = module;
+		pipeline_info.stage.pName  = "main";
+		pipeline_info.layout       = g_fsr.hudless_layout;
+		RequireVulkanSuccess(device.createComputePipelines(nullptr, 1, &pipeline_info, nullptr, &g_fsr.hudless_pipeline),
+		                     "FSR HUD-less pipeline");
+		device.destroyShaderModule(module, nullptr);
+		vk::SamplerCreateInfo sampler_info {};
+		sampler_info.magFilter    = vk::Filter::eLinear;
+		sampler_info.minFilter    = vk::Filter::eLinear;
+		sampler_info.addressModeU = sampler_info.addressModeV = sampler_info.addressModeW = vk::SamplerAddressMode::eClampToEdge;
+		RequireVulkanSuccess(device.createSampler(&sampler_info, nullptr, &g_fsr.hudless_sampler), "FSR HUD-less sampler");
+	}
+	auto& image = g_fsr.hudless;
+	if (image.image == nullptr || image.format != format || image.extent.width != extent.width ||
+	    image.extent.height != extent.height) {
+		if (g_fsr.hudless_view != nullptr) {
+			device.waitIdle();
+			device.destroyImageView(g_fsr.hudless_view, nullptr);
+			g_fsr.hudless_view = nullptr;
+		}
+		if (image.image != nullptr) graphics.DeleteImage(image);
+		vk::ImageCreateInfo create {};
+		create.imageType   = vk::ImageType::e2D;
+		create.extent      = vk::Extent3D {extent.width, extent.height, 1};
+		create.mipLevels   = 1;
+		create.arrayLayers = 1;
+		create.format      = format;
+		create.tiling      = vk::ImageTiling::eOptimal;
+		create.usage       = vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eSampled;
+		create.samples     = vk::SampleCountFlagBits::e1;
+		if (!graphics.CreateImage(create, image)) {
+			g_fsr.hudless_failed = true;
+			return false;
+		}
+		vk::ImageViewCreateInfo view_info {};
+		view_info.image            = image.image;
+		view_info.viewType         = vk::ImageViewType::e2D;
+		view_info.format           = format;
+		view_info.subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
+		RequireVulkanSuccess(device.createImageView(&view_info, nullptr, &g_fsr.hudless_view), "FSR HUD-less view");
+	}
+	return true;
+}
+
+void FsrDestroyContext() {
+	if (g_fsr.context != nullptr) {
+		ffxDestroyContext(&g_fsr.context, nullptr);
+		g_fsr.context = nullptr;
+	}
+}
+
+bool FsrEnsureContext(vk::Extent2D backbuffer, vk::Format format) {
+	if (g_fsr.context != nullptr && g_fsr.context_backbuffer == backbuffer && g_fsr.context_format == format) return true;
+	auto& graphics = *g_fsr.graphics;
+	// (The device must be idle of the old context's work: its resources are released.)
+	if (g_fsr.context != nullptr) {
+		graphics.device.waitIdle();
+		FsrDestroyContext();
+	}
+	ffxCreateBackendVKDesc backend {};
+	backend.header.type      = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_VK;
+	backend.vkDevice         = static_cast<VkDevice>(graphics.device);
+	backend.vkPhysicalDevice = static_cast<VkPhysicalDevice>(graphics.physical_device);
+	backend.vkDeviceProcAddr = VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceProcAddr;
+	ffxCreateContextDescFrameGeneration create {};
+	create.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION;
+	create.header.pNext = &backend.header;
+	// The game's depth is reversed-Z with an infinite far plane (as DLSS-G is told).
+	create.flags            = FFX_FRAMEGENERATION_ENABLE_DEPTH_INVERTED | FFX_FRAMEGENERATION_ENABLE_DEPTH_INFINITE;
+	create.displaySize      = {backbuffer.width, backbuffer.height};
+	create.maxRenderSize    = {std::max(backbuffer.width, 3840u), std::max(backbuffer.height, 2160u)};
+	create.backBufferFormat = ffxApiGetSurfaceFormatVK(static_cast<VkFormat>(format));
+	if (const auto result = ffxCreateContext(&g_fsr.context, &create.header, nullptr); result != FFX_API_RETURN_OK) {
+		std::printf("Frame generation: FSR context creation failed (%u)\n", static_cast<uint32_t>(result));
+		g_fsr.context = nullptr;
+		return false;
+	}
+	g_fsr.context_backbuffer = backbuffer;
+	g_fsr.context_format     = format;
+	std::printf("Frame generation: FSR 3.1 ready (%ux%u)\n", backbuffer.width, backbuffer.height);
+	std::fflush(stdout);
+	return true;
+}
+
+// The camera terms FSR takes from the game's world->clip matrix (as Decompose finds them for DLSS-G): the near plane
+// and the vertical field of view.
+bool FsrCamera(const std::array<float, 16>& m, float* z_near, float* fov) {
+	const double r1[4] {m[4], m[5], m[6], m[7]};
+	const double r3[4] {m[12], m[13], m[14], m[15]};
+	const double flen = std::sqrt(r3[0] * r3[0] + r3[1] * r3[1] + r3[2] * r3[2]);
+	if (flen < 1e-6) return false;
+	const double f[3] {r3[0] / flen, r3[1] / flen, r3[2] / flen};
+	const double off = (r1[0] * f[0] + r1[1] * f[1] + r1[2] * f[2]) / flen;
+	const double v[3] {r1[0] / flen - off * f[0], r1[1] / flen - off * f[1], r1[2] / flen - off * f[2]};
+	const double sy = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+	if (sy < 1e-9) return false;
+	*z_near = static_cast<float>(m[11] / flen);
+	*fov    = static_cast<float>(2.0 * std::atan(1.0 / sy));
+	return std::isfinite(*z_near) && *z_near > 0.0f && std::isfinite(*fov);
+}
+#endif
+
 } // namespace
+
+bool FsrRequested() {
+#ifdef KYTY_FRAMEGEN_FSR
+	return g_fsr.requested;
+#else
+	return false;
+#endif
+}
+
+void NotePresent(uint64_t microseconds) {
+	g_present_us.fetch_add(microseconds, std::memory_order_relaxed);
+	g_present_count.fetch_add(1, std::memory_order_relaxed);
+}
+
+void OnComposite(ImageId ui, uint64_t ui_address) {
+	g_ui = {ui, ui_address, true};
+}
+
+void RecordHudless(vk::CommandBuffer command, vk::Image backbuffer, const FrameInputs* inputs, vk::Extent2D extent,
+                   vk::Rect2D region) {
+#ifdef KYTY_FRAMEGEN_FSR
+	if (!g_fsr.hudless_frame || inputs == nullptr || !inputs->ui_valid) return;
+	g_fsr.hudless_frame = false;
+	auto& image = g_fsr.hudless;
+	// The backbuffer as presented, into the HUD-less image.
+	vk::ImageMemoryBarrier2 out {};
+	out.srcStageMask        = vk::PipelineStageFlagBits2::eAllCommands;
+	out.srcAccessMask       = vk::AccessFlagBits2::eMemoryWrite;
+	out.dstStageMask        = vk::PipelineStageFlagBits2::eTransfer;
+	out.dstAccessMask       = vk::AccessFlagBits2::eTransferRead;
+	out.oldLayout           = vk::ImageLayout::ePresentSrcKHR;
+	out.newLayout           = vk::ImageLayout::eTransferSrcOptimal;
+	out.srcQueueFamilyIndex = out.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	out.image               = backbuffer;
+	out.subresourceRange    = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
+	vk::DependencyInfo dependency {};
+	dependency.imageMemoryBarrierCount = 1;
+	dependency.pImageMemoryBarriers    = &out;
+	command.pipelineBarrier2(dependency);
+	Transition(command, image, vk::ImageAspectFlagBits::eColor, vk::ImageLayout::eTransferDstOptimal,
+	           vk::AccessFlagBits2::eTransferWrite, vk::PipelineStageFlagBits2::eTransfer);
+	vk::ImageCopy copy {};
+	copy.srcSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1};
+	copy.dstSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1};
+	copy.extent         = vk::Extent3D {extent.width, extent.height, 1};
+	command.copyImage(backbuffer, vk::ImageLayout::eTransferSrcOptimal, image.image, vk::ImageLayout::eTransferDstOptimal, copy);
+	auto back = out;
+	back.srcStageMask  = vk::PipelineStageFlagBits2::eTransfer;
+	back.srcAccessMask = vk::AccessFlagBits2::eTransferRead;
+	back.dstStageMask  = vk::PipelineStageFlagBits2::eAllCommands;
+	back.dstAccessMask = vk::AccessFlagBits2::eMemoryRead;
+	back.oldLayout     = vk::ImageLayout::eTransferSrcOptimal;
+	back.newLayout     = vk::ImageLayout::ePresentSrcKHR;
+	dependency.pImageMemoryBarriers = &back;
+	command.pipelineBarrier2(dependency);
+	// Darkened where the interface covers it.
+	Transition(command, image, vk::ImageAspectFlagBits::eColor, vk::ImageLayout::eGeneral,
+	           vk::AccessFlagBits2::eShaderStorageRead | vk::AccessFlagBits2::eShaderStorageWrite,
+	           vk::PipelineStageFlagBits2::eComputeShader);
+	command.bindPipeline(vk::PipelineBindPoint::eCompute, g_fsr.hudless_pipeline);
+	vk::DescriptorImageInfo ui_info {g_fsr.hudless_sampler, inputs->ui_view, vk::ImageLayout::eShaderReadOnlyOptimal};
+	vk::DescriptorImageInfo target_info {nullptr, g_fsr.hudless_view, vk::ImageLayout::eGeneral};
+	vk::WriteDescriptorSet writes[2] {};
+	writes[0].dstBinding      = 0;
+	writes[0].descriptorCount = 1;
+	writes[0].descriptorType  = vk::DescriptorType::eCombinedImageSampler;
+	writes[0].pImageInfo      = &ui_info;
+	writes[1].dstBinding      = 1;
+	writes[1].descriptorCount = 1;
+	writes[1].descriptorType  = vk::DescriptorType::eStorageImage;
+	writes[1].pImageInfo      = &target_info;
+	command.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, g_fsr.hudless_layout, 0, 2, writes);
+	struct {
+		int32_t offset[2], size[2], extent[2];
+		float   threshold, unused;
+	} constants {{region.offset.x, region.offset.y},
+	             {static_cast<int32_t>(region.extent.width), static_cast<int32_t>(region.extent.height)},
+	             {static_cast<int32_t>(extent.width), static_cast<int32_t>(extent.height)},
+	             1.0f / 255.0f,
+	             0.0f};
+	command.pushConstants(g_fsr.hudless_layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(constants), &constants);
+	command.dispatch((extent.width + 7) / 8, (extent.height + 7) / 8, 1);
+	Transition(command, image, vk::ImageAspectFlagBits::eColor, vk::ImageLayout::eShaderReadOnlyOptimal,
+	           vk::AccessFlagBits2::eShaderRead, vk::PipelineStageFlagBits2::eAllCommands);
+#else
+	(void)command;
+	(void)backbuffer;
+	(void)inputs;
+	(void)extent;
+	(void)region;
+#endif
+}
+
+bool FsrActive() {
+#ifdef KYTY_FRAMEGEN_FSR
+	return g_fsr.swapchain_context != nullptr;
+#else
+	return false;
+#endif
+}
+
+bool CreateSwapchain(GraphicContext& graphics, const vk::SwapchainCreateInfoKHR& info, vk::SwapchainKHR* swapchain) {
+#ifdef KYTY_FRAMEGEN_FSR
+	if (!g_fsr.requested) return false;
+	if (g_fsr.swapchain_context != nullptr) {
+		// A swapchain made again (resize, out of date): FidelityFX's create, through the dispatcher.
+		VkSwapchainKHR handle = VK_NULL_HANDLE;
+		const auto     native = static_cast<VkSwapchainCreateInfoKHR>(info);
+		if (FsrCreateSwapchain(static_cast<VkDevice>(graphics.device), &native, nullptr, &handle) != VK_SUCCESS) return false;
+		g_fsr.swapchain = handle;
+		*swapchain      = handle;
+		return true;
+	}
+	const auto present_family = graphics.framegen_family;
+	VkBool32   can_present    = VK_FALSE;
+	if (present_family != static_cast<uint32_t>(-1)) {
+		vk::Bool32 supported = VK_FALSE;
+		if (graphics.physical_device.getSurfaceSupportKHR(present_family, info.surface, &supported) == vk::Result::eSuccess) {
+			can_present = supported;
+		}
+	}
+	if (present_family == static_cast<uint32_t>(-1) || !can_present) {
+		std::printf("Frame generation: no queue family for FSR's presents; frame generation off\n");
+		g_fsr.requested = false;
+		return false;
+	}
+	g_fsr.graphics = &graphics;
+	ffxCreateContextDescFrameGenerationSwapChainVK create {};
+	create.header.type          = FFX_API_CREATE_CONTEXT_DESC_TYPE_FGSWAPCHAIN_VK;
+	create.physicalDevice       = static_cast<VkPhysicalDevice>(graphics.physical_device);
+	create.device               = static_cast<VkDevice>(graphics.device);
+	VkSwapchainKHR handle       = VK_NULL_HANDLE;
+	create.swapchain            = &handle;
+	create.allocator            = nullptr;
+	create.createInfo           = static_cast<VkSwapchainCreateInfoKHR>(info);
+	create.gameQueue            = {static_cast<VkQueue>(graphics.queue), graphics.queue_family, FsrSubmitGame};
+	create.asyncComputeQueue    = {static_cast<VkQueue>(graphics.framegen_queues[0]), present_family, nullptr};
+	create.presentQueue         = {static_cast<VkQueue>(graphics.framegen_queues[1]), present_family, nullptr};
+	create.imageAcquireQueue    = {static_cast<VkQueue>(graphics.framegen_queues[2]), present_family, nullptr};
+	if (const auto result = ffxCreateContext(&g_fsr.swapchain_context, &create.header, nullptr); result != FFX_API_RETURN_OK) {
+		std::printf("Frame generation: FSR swapchain creation failed (%u); frame generation off\n", static_cast<uint32_t>(result));
+		g_fsr.swapchain_context = nullptr;
+		g_fsr.requested         = false;
+		return false;
+	}
+	g_fsr.functions             = {};
+	g_fsr.functions.header.type = FFX_API_QUERY_DESC_TYPE_FGSWAPCHAIN_FUNCTIONS_VK;
+	ffxQuery(&g_fsr.swapchain_context, &g_fsr.functions.header);
+	// From now on the swapchain calls go to FidelityFX's swapchain.
+	auto& dispatcher                 = VULKAN_HPP_DEFAULT_DISPATCHER;
+	dispatcher.vkCreateSwapchainKHR  = FsrCreateSwapchain;
+	dispatcher.vkDestroySwapchainKHR = FsrDestroySwapchain;
+	dispatcher.vkGetSwapchainImagesKHR = g_fsr.functions.pOutGetSwapchainImagesKHR;
+	dispatcher.vkAcquireNextImageKHR = g_fsr.functions.pOutAcquireNextImageKHR;
+	dispatcher.vkQueuePresentKHR     = g_fsr.functions.pOutQueuePresentKHR;
+	g_fsr.swapchain = handle;
+	*swapchain      = handle;
+	g_ready         = true;
+	std::printf("Frame generation: FSR 3.1 frame interpolation swapchain (queues of family %u)\n", present_family);
+	std::fflush(stdout);
+	return true;
+#else
+	(void)graphics;
+	(void)info;
+	(void)swapchain;
+	return false;
+#endif
+}
+
+bool DestroySwapchain(GraphicContext& graphics, vk::SwapchainKHR swapchain) {
+#ifdef KYTY_FRAMEGEN_FSR
+	if (g_fsr.swapchain_context == nullptr) return false;
+	FsrDestroySwapchain(static_cast<VkDevice>(graphics.device), static_cast<VkSwapchainKHR>(swapchain), nullptr);
+	if (g_fsr.swapchain == static_cast<VkSwapchainKHR>(swapchain)) g_fsr.swapchain = VK_NULL_HANDLE;
+	return true;
+#else
+	(void)graphics;
+	(void)swapchain;
+	return false;
+#endif
+}
+
+void RecordPrepare(vk::CommandBuffer command, const FrameInputs* inputs, vk::Extent2D backbuffer, vk::Rect2D region,
+                   vk::Format format) {
+#ifdef KYTY_FRAMEGEN_FSR
+	if (!g_ready || g_fsr.swapchain_context == nullptr || g_fsr.swapchain == VK_NULL_HANDLE ||
+	    !FsrEnsureContext(backbuffer, format)) {
+		return;
+	}
+	float      z_near = 0.1f, fov = 1.0f;
+	const bool usable = inputs != nullptr && inputs->valid && FsrCamera(inputs->camera.view_proj, &z_near, &fov);
+	if (usable) {
+		// Kept for the frames that come without inputs.
+		auto& last = g_fsr.last;
+		Configure(*g_fsr.graphics, last.depth, last.depth_view, inputs->depth);
+		Configure(*g_fsr.graphics, last.motion, last.motion_view, inputs->motion);
+		CopyImage(command, const_cast<VulkanImage&>(inputs->depth), last.depth);
+		CopyImage(command, const_cast<VulkanImage&>(inputs->motion), last.motion);
+		last.render_extent = inputs->render_extent;
+		last.camera        = inputs->camera;
+		last.valid         = true;
+		g_fsr.missing_run  = 0;
+	} else {
+		auto& last = g_fsr.last;
+		if (!last.valid) {
+			// Before the game's first frame with inputs (logos, the opening movie): empty ones of the game image's size.
+			VulkanImage depth_like, motion_like;
+			depth_like.format  = vk::Format::eD32Sfloat;
+			motion_like.format = vk::Format::eR16G16Sfloat;
+			depth_like.extent = motion_like.extent = vk::Extent3D {std::max(region.extent.width, 1u), std::max(region.extent.height, 1u), 1};
+			Configure(*g_fsr.graphics, last.depth, last.depth_view, depth_like);
+			Configure(*g_fsr.graphics, last.motion, last.motion_view, motion_like);
+			ClearImage(command, last.depth);
+			ClearImage(command, last.motion);
+			last.render_extent = {depth_like.extent.width, depth_like.extent.height};
+			last.camera        = {};
+			last.valid         = true;
+		} else if (++g_fsr.missing_run == 30) {
+			// Half a second without the game's 3D view (menus, movies, loading screens): no motion, FSR's optical flow alone.
+			ClearImage(command, last.motion);
+		}
+	}
+	// Generation never pauses (the user's choice: always 2x; pausing makes FidelityFX idle the whole device): a frame
+	// without inputs of its own is prepared from the last ones.
+	const FrameInputs* source = usable ? inputs : &g_fsr.last;
+	if (!usable && !FsrCamera(source->camera.view_proj, &z_near, &fov)) {
+		z_near = 0.1f;
+		fov    = 1.0f;
+	}
+	const bool generate = true;
+	++g_fsr.frame_id;
+
+	ffxConfigureDescFrameGeneration configure {};
+	configure.header.type                        = FFX_API_CONFIGURE_DESC_TYPE_FRAMEGENERATION;
+	configure.swapChain                          = reinterpret_cast<void*>(g_fsr.swapchain);
+	configure.presentCallback                    = nullptr;
+	configure.presentCallbackUserContext         = nullptr;
+	configure.frameGenerationCallback            = FsrGenerate;
+	configure.frameGenerationCallbackUserContext = &g_fsr.context;
+	// Menus, movies and loading screens have no depth and motion: those frames are shown as they are.
+	configure.frameGenerationEnabled = generate;
+	configure.allowAsyncWorkloads    = false;
+	g_fsr.hudless_frame = inputs != nullptr && inputs->ui_valid && FsrHudlessReady(backbuffer, format);
+	configure.HUDLessColor = g_fsr.hudless_frame ? FsrResource(g_fsr.hudless) : FfxApiResource {};
+	configure.flags                  = 0;
+	configure.onlyPresentGenerated   = false;
+	configure.generationRect = {region.offset.x, region.offset.y, static_cast<int32_t>(region.extent.width),
+	                            static_cast<int32_t>(region.extent.height)};
+	configure.frameID        = g_fsr.frame_id;
+	if (const auto result = ffxConfigure(&g_fsr.context, &configure.header); result != FFX_API_RETURN_OK) {
+		static uint32_t reported = 0;
+		if (reported++ < 4) std::printf("Frame generation: FSR configure failed (%u)\n", static_cast<uint32_t>(result));
+	}
+	if (generate != g_fsr.generating) {
+		g_fsr.generating = generate;
+		g_presented_frames.store(generate ? 2u : 1u, std::memory_order_relaxed);
+	}
+	const auto now = std::chrono::steady_clock::now();
+	// Every 5 s in the run log: the frames the swapchain showed and the game's frames a second.
+	static auto     window_start   = now;
+	static uint64_t window_frames  = 0;
+	static uint64_t window_presents = 0;
+	++window_frames;
+	if (const double seconds = std::chrono::duration<double>(now - window_start).count(); seconds >= 5.0) {
+		const uint64_t presents = g_fsr.functions.pOutGetLastPresentCountFFXAPI != nullptr
+		                              ? g_fsr.functions.pOutGetLastPresentCountFFXAPI(g_fsr.swapchain)
+		                              : 0;
+		const uint32_t count = g_present_count.exchange(0);
+		const uint64_t us    = g_present_us.exchange(0);
+		std::printf("Frame generation: FSR %s, game %.1f fps, shown %.1f fps; present %.2f ms; without inputs: "
+		            "no TAA %u, no camera %u, neither %u, replaced %u\n",
+		            generate ? "on" : "paused", static_cast<double>(window_frames) / seconds,
+		            static_cast<double>(presents - window_presents) / seconds,
+		            count != 0 ? static_cast<double>(us) / count / 1000.0 : 0.0, g_missing[0].exchange(0),
+		            g_missing[1].exchange(0), g_missing[2].exchange(0), g_missing[3].exchange(0));
+		std::fflush(stdout);
+		window_start    = now;
+		window_frames   = 0;
+		window_presents = presents;
+	}
+	const float delta_ms =
+	    g_fsr.last_frame == std::chrono::steady_clock::time_point {}
+	        ? 16.7f
+	        : std::clamp(std::chrono::duration<float, std::milli>(now - g_fsr.last_frame).count(), 1.0f, 100.0f);
+	g_fsr.last_frame = now;
+	const float width  = static_cast<float>(source->render_extent.width);
+	const float height = static_cast<float>(source->render_extent.height);
+	// The game's vectors point along the motion in UV units (see BeforePresent): FSR wants them towards the previous
+	// position, in pixels after its scale. KYTY_FRAMEGEN_MV_SIGN=1 keeps the game's sign (a comparison).
+	static const float mv_sign = [] {
+		const char* sign = std::getenv("KYTY_FRAMEGEN_MV_SIGN");
+		return sign != nullptr && std::atof(sign) > 0 ? 1.0f : -1.0f;
+	}();
+	ffxDispatchDescFrameGenerationPrepare prepare {};
+	prepare.header.type             = FFX_API_DISPATCH_DESC_TYPE_FRAMEGENERATION_PREPARE;
+	prepare.frameID                 = g_fsr.frame_id;
+	prepare.flags                   = 0;
+	prepare.commandList             = static_cast<void*>(static_cast<VkCommandBuffer>(command));
+	prepare.renderSize              = {source->render_extent.width, source->render_extent.height};
+	prepare.jitterOffset            = {source->camera.jitter_ndc[0] * width * 0.5f, -source->camera.jitter_ndc[1] * height * 0.5f};
+	prepare.motionVectorScale       = {mv_sign * width, mv_sign * height};
+	prepare.frameTimeDelta          = delta_ms;
+	prepare.unused_reset            = false;
+	prepare.cameraNear              = z_near;
+	prepare.cameraFar               = 100000.0f;
+	prepare.cameraFovAngleVertical  = fov;
+	prepare.viewSpaceToMetersFactor = 1.0f;
+	prepare.depth                   = FsrResource(source->depth);
+	prepare.motionVectors           = FsrResource(source->motion);
+	if (const auto result = ffxDispatch(&g_fsr.context, &prepare.header); result != FFX_API_RETURN_OK) {
+		static uint32_t reported = 0;
+		if (reported++ < 4) std::printf("Frame generation: FSR prepare failed (%u)\n", static_cast<uint32_t>(result));
+	}
+#else
+	(void)command;
+	(void)inputs;
+	(void)backbuffer;
+	(void)region;
+	(void)format;
+#endif
+}
 
 bool Enabled() {
 	return g_ready;
@@ -394,6 +988,7 @@ void BypassCommandHooks(vk::Device device) {
 void Initialize() {
 	const char* value = std::getenv("KYTY_FRAMEGEN");
 	g_generate        = value != nullptr ? std::clamp(std::atoi(value), 0, 5) : 0;
+	if (value != nullptr && std::string_view(value) == "fsr") g_generate = 1;
 	if (g_generate == 0) {
 		return;
 	}
@@ -478,6 +1073,11 @@ void Initialize() {
 	_putenv_s("SDL_VULKAN_LIBRARY", interposer.string().c_str());
 	LOGF("frame generation: Streamline loaded from %s, %d generated frame(s)\n",
 	     dir.string().c_str(), g_generate);
+#elif defined(KYTY_FRAMEGEN_FSR)
+	// FSR 3.1 generates one frame per rendered frame (KYTY_FRAMEGEN=fsr, or any count).
+	g_generate      = 1;
+	g_fsr.requested = true;
+	LOGF("frame generation: FSR 3.1 requested\n");
 #else
 	LOGF("frame generation: this build has no Streamline support\n");
 	g_generate = 0;
@@ -763,7 +1363,19 @@ void OnDispatch(uint64_t cs_hash, ImageId depth, uint64_t depth_address, ImageId
 
 void PrepareInputs(GraphicContext& graphics, TextureCache& cache, CommandBuffer& command,
                    FrameInputs& inputs) {
-	inputs.valid = false;
+	inputs.valid    = false;
+	inputs.ui_valid = false;
+	const auto ui   = g_ui;
+	g_ui.valid      = false;
+	if (ui.valid && FsrRequested()) {
+		auto& layer = cache.GetImage(ui.id);
+		if (layer.info.data.address == ui.address) {
+			Configure(graphics, inputs.ui, inputs.ui_view, layer.backing);
+			command.EndRendering();
+			CopyInto(command.Handle(), layer, inputs.ui);
+			inputs.ui_valid = true;
+		}
+	}
 	const bool ready = g_sources.valid && g_camera.valid;
 	const auto sources = g_sources;
 	const auto camera  = g_camera;
@@ -771,6 +1383,7 @@ void PrepareInputs(GraphicContext& graphics, TextureCache& cache, CommandBuffer&
 	g_camera.valid     = false;
 	++g_guest_frame;
 	if (!ready) {
+		g_missing[!sources.valid && !camera.valid ? 2 : !sources.valid ? 0 : 1].fetch_add(1, std::memory_order_relaxed);
 		return;
 	}
 	auto& depth  = cache.GetImage(sources.depth);
@@ -779,6 +1392,7 @@ void PrepareInputs(GraphicContext& graphics, TextureCache& cache, CommandBuffer&
 	    motion.info.data.address != sources.motion_address ||
 	    depth.backing.extent.width != motion.backing.extent.width ||
 	    depth.backing.extent.height != motion.backing.extent.height) {
+		g_missing[3].fetch_add(1, std::memory_order_relaxed);
 		return; // the images were replaced after the TAA pass
 	}
 	Configure(graphics, inputs.depth, inputs.depth_view, depth.backing);
@@ -797,13 +1411,13 @@ void PrepareInputs(GraphicContext& graphics, TextureCache& cache, CommandBuffer&
 }
 
 void DestroyInputs(GraphicContext& graphics, FrameInputs& inputs) {
-	for (auto* view: {&inputs.depth_view, &inputs.motion_view}) {
+	for (auto* view: {&inputs.depth_view, &inputs.motion_view, &inputs.ui_view}) {
 		if (*view != nullptr) {
 			graphics.device.destroyImageView(*view, nullptr);
 			*view = nullptr;
 		}
 	}
-	for (auto* image: {&inputs.depth, &inputs.motion}) {
+	for (auto* image: {&inputs.depth, &inputs.motion, &inputs.ui}) {
 		if (image->image != nullptr) {
 			graphics.DeleteImage(*image);
 		}
