@@ -23,7 +23,7 @@ RESOLUTIONS = ['1280x720', '1920x1080', '2560x1440', '3840x2160']
 RENDER_HEIGHTS = ['1440 (PS5)', '1296', '1152', '1080', '900']
 
 settings = {'game': '', 'resolution': '2560x1440', 'fullscreen': False, 'aspect': True, 'language': 1,
-            'redzone': True, 'ecores': False, 'fps120': False, 'render': 1440}
+            'redzone': True, 'ecores': False, 'fps120': False, 'render': 1440, 'fpshud': True}
 if os.path.isfile(SETTINGS):
 	try:
 		saved = json.loads(kc.read_text(SETTINGS))
@@ -45,6 +45,8 @@ def play_command():
 			args.append('--aspect-fit')
 	if settings['fps120']:
 		args.append('--fps120')
+	if settings['fpshud']:
+		args.append('--fps-hud')
 	if int(settings['render']) > 0 and int(settings['render']) != 1440:
 		args += ['--render-height', str(int(settings['render']))]
 	if settings['game']:
@@ -64,6 +66,9 @@ def precompile_command():
 # A terminal window (Konsole in Desktop Mode) for the live log; after a crash (play) or always (precompile) it
 # waits for Enter, as the Windows console does. Without a terminal the command runs on its own.
 def in_terminal(args, pause_always, title):
+	# Gaming Mode (gamescope) has no terminal windows: the command runs on its own, its log in logs/.
+	if os.environ.get('XDG_CURRENT_DESKTOP', '').lower() == 'gamescope' or os.environ.get('GAMESCOPE_WAYLAND_DISPLAY'):
+		return args
 	pause = 'echo; read -rp "Press Enter to close..."'
 	script = f'cd {shlex.quote(ROOT)}; {shlex.join(args)}; rc=$?; ' + (f'{pause}' if pause_always else f'if [ $rc -ne 0 ]; then {pause}; fi')
 	if shutil.which('konsole'):
@@ -179,6 +184,9 @@ add_row('', redzone_row)
 fps120 = tk.BooleanVar(value=bool(settings['fps120']))
 add_row('', lambda row: ttk.Checkbutton(row, text="Up to 120 fps (the game's own frames; movies play faster)",
                                         variable=fps120).pack(side='left'))
+fpshud = tk.BooleanVar(value=bool(settings['fpshud']))
+add_row('', lambda row: ttk.Checkbutton(row, text='Show FPS (the game\'s frames a second, top corner)',
+                                        variable=fpshud).pack(side='left'))
 render = tk.StringVar(value=next((h for h in RENDER_HEIGHTS if h.split(' ')[0] == str(int(settings['render']))),
                                  RENDER_HEIGHTS[0]))
 
@@ -211,6 +219,7 @@ def read_form():
 	settings['language'] = LANGUAGES.index(language.get())
 	settings['redzone'] = redzone.get()
 	settings['fps120'] = fps120.get()
+	settings['fpshud'] = fpshud.get()
 	settings['render'] = int(render.get().split(' ')[0])
 	settings['ecores'] = ecores.get()
 	save_settings()

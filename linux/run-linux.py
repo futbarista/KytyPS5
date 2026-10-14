@@ -20,6 +20,7 @@
 #   ./run.sh --prompt                 a dialog first when the game version is untested or the shaders are not
 #                                     precompiled for this GPU (run.sh passes it)
 #   ./run.sh --follow                 stay open showing the run log until the game exits, then its exit code
+#   ./run.sh --fps-hud                the game's frames a second in the corner of the window
 #   ./run.sh --dry-run                print environment and command only
 # --no-redzone is accepted and does nothing: the red-zone protection is for Windows, whose exception dispatch
 # writes over the guest's SysV red zone; Linux signal delivery skips it (the emulator has the option on Windows only).
@@ -56,6 +57,7 @@ p.add_argument('--render-height', type=int, default=0)
 p.add_argument('--set', action='append', default=[])
 p.add_argument('--patch', default='')
 p.add_argument('--aspect-fit', action='store_true')
+p.add_argument('--fps-hud', action='store_true')
 p.add_argument('--language', type=int, default=-1)
 p.add_argument('--affinity', default='')
 p.add_argument('--prompt', action='store_true')
@@ -187,6 +189,9 @@ if a.threads > 0:
 env.setdefault('KYTY_HITCH_LOG_MS', '100')
 if a.aspect_fit:
 	env['KYTY_PRESENT_ASPECT'] = 'fit'
+# --fps-hud: the emulator's own frame counter in the corner (the game's frames a second, KYTY_FPS_HUD).
+if a.fps_hud:
+	env['KYTY_FPS_HUD'] = '1'
 # --set KEY=VALUE overrides a switch of the config; KEY= drops it. Several: --set A=1,B=2.
 for item in a.set:
 	for pair in re.split(r',(?=[A-Za-z_][A-Za-z0-9_]*=)', item):
