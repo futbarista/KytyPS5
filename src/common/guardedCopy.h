@@ -5,11 +5,13 @@
 
 namespace Common {
 
-#if defined(_WIN32)
 // A copy that stops at the first byte it cannot read or write: the access violation resumes after the copy
 // (hostException.cpp asks ResumeGuardedCopy before the guest-memory fault handler). Returns the bytes not copied:
-// 0 when all were, else the copy ended at byte `size` - returned (a page without access there).
+// 0 when all were, else the copy ended at byte `size` - returned (a page without access there). Linux: the source is
+// read with process_vm_readv, which stops at a page without read access (EFAULT) instead of raising SIGSEGV, so the
+// guest-memory fault handler is not entered either; the destination is the caller's own memory.
 uint64_t GuardedCopy(void* destination, const void* source, uint64_t size) noexcept;
+#if defined(_WIN32)
 // The vectored exception handler's check (`context`: the fault's CONTEXT): true when the access violation is
 // GuardedCopy's, with the context moved past its copy.
 bool ResumeGuardedCopy(void* context) noexcept;

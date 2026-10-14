@@ -2026,7 +2026,6 @@ void BufferCache::FlushPrologueCopies(vk::CommandBuffer command) {
 // mapping) are uploaded as zeros, reported.
 static void ReadUploadSource(uint8_t* destination, uint64_t address, uint64_t size) {
 	if (Libs::LibKernel::Memory::TryReadBackingToHost(address, destination, size)) return;
-#if defined(_WIN32)
 	if (const auto missed = Common::GuardedCopy(destination, reinterpret_cast<const void*>(address), size); missed != 0) {
 		std::memset(destination + (size - missed), 0, missed);
 		static std::atomic<uint32_t> reported {0};
@@ -2035,9 +2034,6 @@ static void ReadUploadSource(uint8_t* destination, uint64_t address, uint64_t si
 			            static_cast<unsigned long long>(address), static_cast<unsigned long long>(size),
 			            static_cast<unsigned long long>(size - missed));
 	}
-#else
-	std::memcpy(destination, reinterpret_cast<const void*>(address), size);
-#endif
 }
 
 vk::Buffer BufferCache::UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> copies,

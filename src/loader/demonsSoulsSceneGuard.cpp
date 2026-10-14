@@ -172,18 +172,23 @@ std::atomic<uint32_t>                 g_null_count {0};
 std::atomic<bool>                     g_null_dump {false};
 
 void DumpThreads(const char* when) {
+#if defined(_WIN32)
 	LocalPlatform::PrepareSampling();
+#endif
 	const auto self = LocalPlatform::ThreadId();
 	std::string out = std::string("SCENE-NULL threads ") + when + "\n";
 	char        line[160];
 	for (const auto& [tid, name]: LocalPlatform::ProcessThreads()) {
 		if (tid == self || name.rfind("SDLAudio", 0) == 0) continue;
+		uint64_t words[24] {};
+#if defined(_WIN32)
 		const auto handle = LocalPlatform::OpenThreadForSampling(tid);
 		if (handle == 0) continue;
-		uint64_t   words[24] {};
 		const bool sampled = LocalPlatform::SampleThread(handle, 0, 0, words, std::size(words));
 		LocalPlatform::CloseThreadForSampling(handle);
 		if (!sampled) continue;
+#endif
+		// (Linux: no thread sampling; the threads are listed by name only.)
 		std::snprintf(line, sizeof(line), "SCENE-NULL   %u %s:", tid, name.empty() ? "-" : name.c_str());
 		out += line;
 		for (const auto word: words) {

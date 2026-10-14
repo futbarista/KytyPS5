@@ -49,4 +49,31 @@ bool ResumeGuardedCopy(void* context) noexcept {
 
 } // namespace Common
 
+#else
+
+#include <sys/uio.h>
+#include <unistd.h>
+
+#include <cerrno>
+
+namespace Common {
+
+uint64_t GuardedCopy(void* destination, const void* source, uint64_t size) noexcept {
+	static const pid_t self = getpid();
+	auto*              to   = static_cast<uint8_t*>(destination);
+	const auto*        from = static_cast<const uint8_t*>(source);
+	uint64_t           done = 0;
+	while (done < size) {
+		const iovec local {to + done, size - done};
+		const iovec remote {const_cast<uint8_t*>(from + done), size - done};
+		const auto  read = process_vm_readv(self, &local, 1, &remote, 1, 0);
+		if (read < 0 && errno == EINTR) continue;
+		if (read <= 0) break;
+		done += static_cast<uint64_t>(read);
+	}
+	return size - done;
+}
+
+} // namespace Common
+
 #endif

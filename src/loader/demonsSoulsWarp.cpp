@@ -253,7 +253,7 @@ void ToggleSelected() {
 	Arm(spawns[selected].map, spawns[selected].name);
 }
 
-#if defined(_WIN32)
+#if 1 // (GuardedCopy: Windows and Linux)
 namespace {
 
 // A guest read that stops at a page without access (no player while loading) instead of faulting.
@@ -323,7 +323,7 @@ void GlideThread() {
 #endif
 
 double Glide(float x, float y, float z, float speed) {
-#if defined(_WIN32)
+#if 1 // (GuardedCopy: Windows and Linux)
 	uint64_t ctrl = 0, body = 0;
 	float    from[3] {};
 	if (!(speed > 0) || !IsPlayerBuild() || !FindPlayer(&ctrl, &body) || !Peek(body + 0x20, &from)) return -1;
@@ -354,7 +354,7 @@ double Glide(float x, float y, float z, float speed) {
 void RecordWaypoint() {
 	float xyz[3] {}, angles[4] {};
 	bool  found = false;
-#if defined(_WIN32)
+#if 1 // (GuardedCopy: Windows and Linux)
 	uint64_t ctrl = 0, body = 0;
 	if (!IsPlayerBuild()) {
 		std::lock_guard lock(g_mutex);

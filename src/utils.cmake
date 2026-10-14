@@ -117,7 +117,7 @@ if(KYTY_CLANG_CL)
 elseif(CLANG OR GCC)
 
 	if (CLANG)
-	    set(KYTY_CPP_FLAGS "${KYTY_CPP_FLAGS} -fno-rtti -fno-exceptions -fcolor-diagnostics -finput-charset=UTF-8 -fexec-charset=UTF-8 -g -fno-strict-aliasing -fno-omit-frame-pointer -Wall -fmessage-length=0")
+	    set(KYTY_CPP_FLAGS "${KYTY_CPP_FLAGS} -fno-rtti -fexceptions -fcolor-diagnostics -finput-charset=UTF-8 -fexec-charset=UTF-8 -g -fno-strict-aliasing -fno-omit-frame-pointer -Wall -fmessage-length=0")
 	    if (WIN32)
 	    	set(KYTY_CPP_FLAGS "${KYTY_CPP_FLAGS} -static")
 	    endif()
