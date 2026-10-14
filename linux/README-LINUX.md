@@ -1,6 +1,7 @@
-# KytyPS5 v20261013 — build dla Linuksa / SteamOS
+# KytyPS5 v20261014 — build dla Linuksa / SteamOS
 
-Ten sam kod co release `v20261013` z https://github.com/chenxiao07/KytyPS5 (commit `3e6ee3ec`), zbudowany
+Kod release'u `v20261014` z https://github.com/chenxiao07/KytyPS5 (commit `e27d8aed`) z dodatkami tego forka
+(ultrawide, FSR 3.1 frame generation), zbudowany
 natywnie dla Linuksa, z tymi samymi ustawieniami co paczka Windows: clang 19, `-O3 -march=x86-64-v3`, ThinLTO
 oraz te same przełączniki emulatora (`launch.json` = `run-windows.json` z release'u). Pełna instrukcja gry
 (sterowanie, opcje, wymagania) jest w `README.md` (oryginał z paczki Windows); ten plik opisuje tylko różnice.
@@ -50,6 +51,6 @@ W Desktop Mode kliknij prawym przyciskiem `KytyPS5 Launcher.desktop` (lub `KytyP
 
 ## Przebudowa
 
-Źródło: `/home/deck/Emulation/KytyPS5-src` (tag `v20261013` + `linux/linux-port.patch`, czyli linuksowe
-odpowiedniki fragmentów forka, które były tylko dla Windows). Polecenie `linux/build-linux.sh` buduje wszystko
+Źródło: `/home/deck/Emulation/KytyPS5-src` (gałąź `linux-v20261014`: tag `v20261014` z
+upstreamowym portem linuksowym i commitami tego forka). Polecenie `linux/build-linux.sh` buduje wszystko
 w kontenerze distrobox `kyty-build` (Ubuntu 24.04, clang 19) i aktualizuje tę paczkę.

@@ -21,6 +21,7 @@
 #                                     precompiled for this GPU (run.sh passes it)
 #   ./run.sh --follow                 stay open showing the run log until the game exits, then its exit code
 #   ./run.sh --width 3440 --height 1440 --ui-aspect 2.3889   ultrawide (21:9): wider camera, interface in proportion
+#   ./run.sh --hdr                    HDR10 output when the desktop has HDR on for the display (SDR otherwise)
 #   ./run.sh --framegen               FSR 3.1 frame generation (x2 frames on screen)
 #   ./run.sh --fps-hud                the game's frames a second in the corner of the window
 #   ./run.sh --dry-run                print environment and command only
@@ -47,6 +48,7 @@ p.add_argument('--exe', default=kc.EXE)
 p.add_argument('--width', type=int, default=0)
 p.add_argument('--height', type=int, default=0)
 p.add_argument('--fullscreen', action='store_true')
+p.add_argument('--hdr', action='store_true')
 p.add_argument('--baseline', action='store_true')
 p.add_argument('--precompile', action='store_true')
 p.add_argument('--threads', type=int, default=0)
@@ -123,6 +125,8 @@ if a.height > 0:
 	set_option('--screen-height', str(a.height))
 if a.fullscreen:
 	options.append('--fullscreen')
+if a.hdr and '--hdr' not in options:
+	options.append('--hdr')
 if a.present_mode:
 	set_option('--present-mode', a.present_mode)
 if a.language >= 0:

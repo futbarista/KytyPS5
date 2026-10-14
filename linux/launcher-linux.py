@@ -24,7 +24,8 @@ RESOLUTIONS = ['1280x720', '1920x1080', '2560x1440', '3840x2160', '2560x1080 (21
 RENDER_HEIGHTS = ['2160 (4K, PS5 Pro-like)', '1800', '1620', '1440 (PS5)', '1296', '1152', '1080', '900']
 
 settings = {'game': '', 'resolution': '2560x1440', 'fullscreen': False, 'aspect': True, 'language': 1,
-            'redzone': True, 'ecores': False, 'fps120': False, 'render': 1440, 'fpshud': True, 'framegen': False}
+            'redzone': True, 'ecores': False, 'fps120': False, 'render': 1440, 'fpshud': True, 'framegen': False,
+            'vsync': False, 'hdr': False}
 if os.path.isfile(SETTINGS):
 	try:
 		saved = json.loads(kc.read_text(SETTINGS))
@@ -52,6 +53,12 @@ def play_command():
 		args += ['--ui-aspect', f'{ratio:.6g}']
 	if settings['fps120']:
 		args.append('--fps120')
+	# Presents wait for the display's refresh (Vulkan FIFO): no tearing; FreeSync displays keep adapting.
+	if settings['vsync']:
+		args += ['--present-mode', 'Fifo']
+	# HDR10 output when the desktop has HDR on for the display; SDR otherwise.
+	if settings['hdr']:
+		args.append('--hdr')
 	if settings['fpshud']:
 		args.append('--fps-hud')
 	if settings['framegen']:
@@ -193,6 +200,12 @@ add_row('', redzone_row)
 fps120 = tk.BooleanVar(value=bool(settings['fps120']))
 add_row('', lambda row: ttk.Checkbutton(row, text="Up to 120 fps (the game's own frames; movies play faster)",
                                         variable=fps120).pack(side='left'))
+vsync = tk.BooleanVar(value=bool(settings['vsync']))
+add_row('', lambda row: ttk.Checkbutton(row, text='VSync (no screen tearing; FreeSync displays keep it)',
+                                        variable=vsync).pack(side='left'))
+hdr = tk.BooleanVar(value=bool(settings['hdr']))
+add_row('', lambda row: ttk.Checkbutton(row, text='HDR (turn on HDR for the display in the desktop settings first)',
+                                        variable=hdr).pack(side='left'))
 framegen = tk.BooleanVar(value=bool(settings['framegen']))
 add_row('', lambda row: ttk.Checkbutton(row, text='FSR 3 Frame Generation (x2 frames on screen, AMD FidelityFX)',
                                         variable=framegen).pack(side='left'))
@@ -233,6 +246,8 @@ def read_form():
 	settings['fps120'] = fps120.get()
 	settings['fpshud'] = fpshud.get()
 	settings['framegen'] = framegen.get()
+	settings['vsync'] = vsync.get()
+	settings['hdr'] = hdr.get()
 	settings['render'] = int(render.get().split(' ')[0])
 	settings['ecores'] = ecores.get()
 	save_settings()

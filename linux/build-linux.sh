@@ -15,11 +15,6 @@ in_box "command -v clang++-19 >/dev/null && command -v glslangValidator >/dev/nu
 	clang-19 lld-19 llvm-19 ninja-build cmake git glslang-tools python3 pkg-config libgl1-mesa-dev libx11-dev libxcursor-dev \
 	libxext-dev libxfixes-dev libxi-dev libxrandr-dev libxss-dev libxkbcommon-dev libasound2-dev libpulse-dev libudev-dev \
 	libdbus-1-dev libwayland-dev wayland-protocols libdecor-0-dev zlib1g-dev libbz2-dev liblzma-dev"
-# The Linux port of this fork's Windows-only parts (linux/linux-port.patch): exceptions on, as in the Windows build
-# (src/utils.cmake had them off for Linux, the fork's code throws); Common::GuardedCopy on Linux (process_vm_readv), used
-# by the buffer cache's upload reads, the scene guard and the warp tools as on Windows; the scene guard's thread dump
-# without stack sampling.
-if git -C "$SRC" apply --check linux/linux-port.patch 2>/dev/null; then git -C "$SRC" apply linux/linux-port.patch; fi
 if [ ! -f "$BUILD/build.ninja" ]; then
 	in_box "cmake -S '$SRC' -B '$BUILD' -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang-19 -DCMAKE_CXX_COMPILER=clang++-19 \
 		-DCMAKE_AR=/usr/bin/llvm-ar-19 -DCMAKE_RANLIB=/usr/bin/llvm-ranlib-19 -DKYTY_BUILD_LAUNCHER=OFF -DBUILD_TESTING=OFF \
