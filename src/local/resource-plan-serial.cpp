@@ -4,6 +4,7 @@
 #include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
 
 #include <cstring>
+#include <list>
 #include <string>
 #include <type_traits>
 #include <unordered_map>
@@ -17,7 +18,8 @@ namespace {
 constexpr uint32_t Magic = 0x4e4c5052u; // "RPLN"
 
 // A field added to one of these types must be added here too (Save, Load and Same).
-static_assert(sizeof(void*) != 8 || sizeof(IR::ResourcePlan) == 496, "ResourcePlan changed: update resource-plan-serial");
+// (std::list: 16 bytes in MSVC's library, 24 in libstdc++.)
+static_assert(sizeof(void*) != 8 || sizeof(IR::ResourcePlan) == 496 + sizeof(std::list<IR::Inst>) - 16, "ResourcePlan changed: update resource-plan-serial");
 static_assert(sizeof(void*) != 8 || sizeof(IR::ShaderInfo) == 192, "ShaderInfo changed: update resource-plan-serial");
 static_assert(sizeof(void*) != 8 || sizeof(IR::ImageResource) == 80, "ImageResource changed: update resource-plan-serial");
 static_assert(sizeof(void*) != 8 || sizeof(IR::StageInput) == 56, "StageInput changed: update resource-plan-serial");
